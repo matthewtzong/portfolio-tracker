@@ -73,6 +73,7 @@
   - Today’s total portfolio value.
   - Breakdown by account and by holding within each account.
 - **Manual Fidelity Integration**: 
+  - Supports two accounts - Brokerage and Roth IRAs
   - **Statement Uploads**: Supports uploading Fidelity brokerage statements (CSV) to retroactively fill historical monthly snapshots.
   - **Position Uploads**: Supports uploading current "Positions" CSV from Fidelity to update holdings and portfolio value.
   - **Seamless Merging**: Manual data is integrated with Plaid records to ensure a complete daily and monthly view even for accounts with limited API support.
