@@ -33,7 +33,7 @@ export function AppHeader() {
             to="/dashboard"
             className="text-xl font-bold text-white hover:text-primary transition-colors"
           >
-            My portfolio
+            My Portfolio
           </Link>
 
           <nav className="flex items-center gap-1.5">

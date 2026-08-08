@@ -1,8 +1,9 @@
 package server
 
 import (
-	"context"
 	"encoding/csv"
+	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"math"
@@ -17,9 +18,12 @@ import (
 )
 
 const (
-	FidelityManualItemID    = "fidelity_manual_item"
-	FidelityManualAccountID = "fidelity_manual_account"
-	FidelityInstitutionName = "Fidelity"
+	FidelityManualItemID       = "fidelity_manual_item"
+	FidelityBrokerageAccountID = "fidelity_brokerage"
+	FidelityRothIRAAccountID   = "fidelity_roth_ira"
+	FidelityInstitutionName    = "Fidelity"
+	FidelityBrokerageName      = "Fidelity Brokerage"
+	FidelityRothIRAName        = "Fidelity Roth IRA"
 )
 
 // Registers Fidelity routes.
@@ -43,6 +47,18 @@ func registerFidelityRoutes(mux *http.ServeMux, deps apiDependencies) {
 	})))
 }
 
+// Maps the upload accountType form value to a Fidelity account_id and display name.
+func resolveFidelityAccountID(accountType string) (accountID, displayName string, err error) {
+	switch strings.TrimSpace(accountType) {
+	case "", "brokerage":
+		return FidelityBrokerageAccountID, FidelityBrokerageName, nil
+	case "roth_ira":
+		return FidelityRothIRAAccountID, FidelityRothIRAName, nil
+	default:
+		return "", "", errors.New("invalid accountType; expected brokerage or roth_ira")
+	}
+}
+
 // Handles the monthly statement CSV upload.
 func handleFidelityMonthlyUpload(w http.ResponseWriter, r *http.Request, deps apiDependencies) {
 	// Gets file.
@@ -52,6 +68,12 @@ func handleFidelityMonthlyUpload(w http.ResponseWriter, r *http.Request, deps ap
 		return
 	}
 	defer file.Close()
+
+	accountID, displayName, err := resolveFidelityAccountID(r.FormValue("accountType"))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Validates filename: Statement{Month}{Date}{Year}.csv
 	re := regexp.MustCompile(`^Statement(\d{1,2})(\d{2})(\d{4})\.csv$`)
@@ -69,13 +91,6 @@ func handleFidelityMonthlyUpload(w http.ResponseWriter, r *http.Request, deps ap
 	// Creates statement date.
 	statementDate := time.Date(year, time.Month(month), day, 0, 0, 0, 0, GetLocalLocation())
 
-	// Ensures the Fidelity account exists.
-	err = ensureFidelityAccountExists(r.Context(), deps)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to ensure Fidelity account exists: "+err.Error())
-		return
-	}
-
 	// Parses CSV.
 	holdings, err := parseFidelityMonthlyCSV(file)
 	if err != nil {
@@ -83,24 +98,22 @@ func handleFidelityMonthlyUpload(w http.ResponseWriter, r *http.Request, deps ap
 		return
 	}
 
-	// Clear existing manual holdings for this date to support re-uploads.
-	err = deps.db.DeleteDailyHoldingsByAccountAndDate(r.Context(), FidelityManualAccountID, statementDate)
+	// Clear existing holdings for the selected account/date to support re-uploads.
+	err = deps.db.DeleteDailyHoldingsByAccountAndDate(r.Context(), accountID, statementDate)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to clear old holdings: "+err.Error())
 		return
 	}
 
 	// Upsert holdings for that date.
-	var totalValueCents int64
 	for _, h := range holdings {
 		h.Date = database.DateOnly{Time: statementDate}
-		h.AccountID = FidelityManualAccountID
+		h.AccountID = accountID
 		err := deps.db.UpsertDailyHolding(r.Context(), &h)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to save holding: "+err.Error())
 			return
 		}
-		totalValueCents += h.ValueCents
 	}
 
 	// Update snapshots (daily and monthly) for that date.
@@ -110,8 +123,10 @@ func handleFidelityMonthlyUpload(w http.ResponseWriter, r *http.Request, deps ap
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"message":"Successfully uploaded monthly statement"}`))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"message": "Successfully uploaded monthly statement for " + displayName,
+	})
 }
 
 // Handles the current holdings CSV upload.
@@ -123,6 +138,12 @@ func handleFidelityHoldingsUpload(w http.ResponseWriter, r *http.Request, deps a
 		return
 	}
 	defer file.Close()
+
+	accountID, displayName, err := resolveFidelityAccountID(r.FormValue("accountType"))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Validates filename: Portfolio_Positions_Mar-03-2026.csv
 	// Format: Portfolio_Positions_Mon-DD-YYYY.csv
@@ -153,13 +174,6 @@ func handleFidelityHoldingsUpload(w http.ResponseWriter, r *http.Request, deps a
 	// Creates today's date.
 	today := time.Date(year, month, day, 0, 0, 0, 0, GetLocalLocation())
 
-	// Ensure the Fidelity account exists.
-	err = ensureFidelityAccountExists(r.Context(), deps)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to ensure Fidelity account exists: "+err.Error())
-		return
-	}
-
 	// Parses CSV.
 	holdings, err := parseFidelityHoldingsCSV(file)
 	if err != nil {
@@ -167,8 +181,8 @@ func handleFidelityHoldingsUpload(w http.ResponseWriter, r *http.Request, deps a
 		return
 	}
 
-	// Clear existing manual holdings for today.
-	err = deps.db.DeleteDailyHoldingsByAccountAndDate(r.Context(), FidelityManualAccountID, today)
+	// Clear existing holdings for the selected account/date.
+	err = deps.db.DeleteDailyHoldingsByAccountAndDate(r.Context(), accountID, today)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to clear old holdings: "+err.Error())
 		return
@@ -177,7 +191,7 @@ func handleFidelityHoldingsUpload(w http.ResponseWriter, r *http.Request, deps a
 	// Upsert holdings.
 	for _, h := range holdings {
 		h.Date = database.DateOnly{Time: today}
-		h.AccountID = FidelityManualAccountID
+		h.AccountID = accountID
 		err = deps.db.UpsertDailyHolding(r.Context(), &h)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to save holding: "+err.Error())
@@ -192,8 +206,10 @@ func handleFidelityHoldingsUpload(w http.ResponseWriter, r *http.Request, deps a
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"message":"Successfully uploaded current holdings"}`))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"message": "Successfully uploaded current holdings for " + displayName,
+	})
 }
 
 // Parses the Fidelity monthly holdings CSV.
@@ -321,59 +337,16 @@ func parseCents(s string) int64 {
 	return int64(math.Round(val * 100))
 }
 
-// Ensures the Fidelity account exists.
-func ensureFidelityAccountExists(ctx context.Context, deps apiDependencies) error {
-	// Check if item exists.
-	item, err := deps.db.GetPlaidItemByItemID(ctx, FidelityManualItemID)
-	if err != nil {
-		return err
-	}
-
-	// If item doesn't exist, create it.
-	if item == nil {
-		item = &database.PlaidItem{
-			ItemID:          FidelityManualItemID,
-			AccessToken:     "manual",
-			Status:          "OK",
-			InstitutionName: stringPtr(FidelityInstitutionName),
-			LastUpdated:     GetLocalNow(),
-		}
-		if err := deps.db.UpsertPlaidItem(ctx, item); err != nil {
-			return err
-		}
-	}
-
-	// Check if account exists.
-	plaidAccounts, err := deps.db.ListPlaidAccounts(ctx)
-	if err != nil {
-		return err
-	}
-
-	found := false
-	for _, a := range plaidAccounts {
-		if a.AccountID == FidelityManualAccountID {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		account := database.PlaidAccount{
-			PlaidItemID:    FidelityManualItemID,
-			AccountID:      FidelityManualAccountID,
-			Name:           "Fidelity Brokerage",
-			Type:           "investment",
-			CurrentBalance: 0, // Will be updated by holdings
-		}
-		if err := deps.db.UpsertPlaidAccounts(ctx, []database.PlaidAccount{account}); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 func stringPtr(s string) *string { return &s }
+
+// Manual Fidelity account IDs and their display names for balance updates.
+var fidelityManualAccounts = []struct {
+	AccountID   string
+	DisplayName string
+}{
+	{FidelityBrokerageAccountID, FidelityBrokerageName},
+	{FidelityRothIRAAccountID, FidelityRothIRAName},
+}
 
 // Updates both the daily and monthly snapshots for a given date.
 func updatePortfolioSnapshots(r *http.Request, deps apiDependencies, date time.Time) error {
@@ -418,26 +391,33 @@ func updatePortfolioSnapshots(r *http.Request, deps apiDependencies, date time.T
 		return err
 	}
 
-	// Update PlaidAccount current_balance for the Fidelity account.
-	fidelityTotal, ok := accountTotals[FidelityManualAccountID]
-	if ok {
-		manualItem := &database.PlaidItem{
-			ItemID:          FidelityManualItemID,
-			InstitutionName: stringPtr(FidelityInstitutionName),
-			AccessToken:     "manual",
-			Status:          "OK",
-			LastUpdated:     date,
+	// Update current_balance for each Fidelity manual account that has holdings totals.
+	manualItem := &database.PlaidItem{
+		ItemID:          FidelityManualItemID,
+		InstitutionName: stringPtr(FidelityInstitutionName),
+		AccessToken:     "manual",
+		Status:          "OK",
+		LastUpdated:     date,
+	}
+	updatedAnyFidelity := false
+	accountsToUpsert := make([]database.PlaidAccount, 0, 2)
+	for _, fidelityAccount := range fidelityManualAccounts {
+		total, ok := accountTotals[fidelityAccount.AccountID]
+		if !ok {
+			continue
 		}
-		_ = deps.db.UpsertPlaidItem(r.Context(), manualItem)
-
-		account := database.PlaidAccount{
+		updatedAnyFidelity = true
+		accountsToUpsert = append(accountsToUpsert, database.PlaidAccount{
 			PlaidItemID:    FidelityManualItemID,
-			AccountID:      FidelityManualAccountID,
-			Name:           "Fidelity Brokerage",
+			AccountID:      fidelityAccount.AccountID,
+			Name:           fidelityAccount.DisplayName,
 			Type:           "investment",
-			CurrentBalance: float64(fidelityTotal) / 100.0,
-		}
-		_ = deps.db.UpsertPlaidAccounts(r.Context(), []database.PlaidAccount{account})
+			CurrentBalance: float64(total) / 100.0,
+		})
+	}
+	if updatedAnyFidelity {
+		_ = deps.db.UpsertPlaidItem(r.Context(), manualItem)
+		_ = deps.db.UpsertPlaidAccounts(r.Context(), accountsToUpsert)
 	}
 
 	// Update monthly snapshots if it's month-end.

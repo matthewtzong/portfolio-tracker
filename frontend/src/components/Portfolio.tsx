@@ -105,6 +105,9 @@ export function Portfolio() {
     type: 'success' | 'error'
   } | null>(null)
   const [uploadLoading, setUploadLoading] = useState(false)
+  const [fidelityAccountType, setFidelityAccountType] = useState<'brokerage' | 'roth_ira'>(
+    'brokerage',
+  )
 
   // Loads the holdings.
   const loadHoldings = useCallback(async () => {
@@ -372,6 +375,7 @@ export function Portfolio() {
       } = await supabase.auth.getSession()
       const formData = new FormData()
       formData.append('file', file)
+      formData.append('accountType', fidelityAccountType)
 
       const API_URL = import.meta.env.VITE_API_URL || ''
       const endpoint =
@@ -494,6 +498,38 @@ export function Portfolio() {
               <p className="text-zinc-500 text-sm font-medium">
                 Manually track Fidelity performance by uploading statements or current holdings.
               </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-6">
+            <span className="text-sm font-bold text-zinc-400 uppercase tracking-wider">
+              Upload for
+            </span>
+            <div className="inline-flex rounded-full border border-border bg-zinc-800/50 p-1">
+              <button
+                type="button"
+                onClick={() => setFidelityAccountType('brokerage')}
+                disabled={uploadLoading}
+                className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${
+                  fidelityAccountType === 'brokerage'
+                    ? 'bg-primary text-background'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Brokerage
+              </button>
+              <button
+                type="button"
+                onClick={() => setFidelityAccountType('roth_ira')}
+                disabled={uploadLoading}
+                className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${
+                  fidelityAccountType === 'roth_ira'
+                    ? 'bg-primary text-background'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Roth IRA
+              </button>
             </div>
           </div>
 
