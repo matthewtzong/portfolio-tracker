@@ -45,6 +45,57 @@ func TestPlaidTransactionToDB_CategoryRuleTakesPrecedence(t *testing.T) {
 	}
 }
 
+func TestPlaidTransactionToDB_AccountScopedRule(t *testing.T) {
+	categoryCCPayment := int64(30)
+	categoryFood := int64(31)
+	categoryUncategorized := int64(32)
+	checkingID := "checking-acc"
+	creditID := "credit-acc"
+
+	plaidNameToCategoryID := map[string]int64{
+		"Food and Drink": categoryFood,
+	}
+
+	rules := []database.CategoryRule{
+		{
+			ID:             1,
+			MatchString:    "capital one",
+			CategoryID:     categoryCCPayment,
+			PlaidAccountID: &checkingID,
+		},
+	}
+
+	// Checking + "Capital One" -> Credit Card Payments rule.
+	checkingTx := plaid.PlaidTransaction{
+		AccountID:     checkingID,
+		TransactionID: "tx-check",
+		Amount:        100.00,
+		Date:          "2024-01-15",
+		Name:          "Capital One",
+		Category:      []string{"Transfer"},
+		Pending:       false,
+	}
+	resultChecking := plaidTransactionToDB(checkingTx, plaidNameToCategoryID, categoryUncategorized, rules)
+	if resultChecking.CategoryID == nil || *resultChecking.CategoryID != categoryCCPayment {
+		t.Fatalf("expected CC payment category %d on checking, got %#v", categoryCCPayment, resultChecking.CategoryID)
+	}
+
+	// Credit + "Capital One Cafe" -> rule skipped; falls back to Plaid Food and Drink.
+	creditTx := plaid.PlaidTransaction{
+		AccountID:     creditID,
+		TransactionID: "tx-credit",
+		Amount:        12.00,
+		Date:          "2024-01-16",
+		Name:          "Capital One Cafe",
+		Category:      []string{"Food and Drink"},
+		Pending:       false,
+	}
+	resultCredit := plaidTransactionToDB(creditTx, plaidNameToCategoryID, categoryUncategorized, rules)
+	if resultCredit.CategoryID == nil || *resultCredit.CategoryID != categoryFood {
+		t.Fatalf("expected food category %d on credit, got %#v", categoryFood, resultCredit.CategoryID)
+	}
+}
+
 func TestPlaidTransactionToDB_FallsBackToPlaidPrimaryOrUncategorized(t *testing.T) {
 	categoryInvestments := int64(10)
 	categoryUncategorized := int64(11)

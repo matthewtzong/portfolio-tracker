@@ -209,7 +209,11 @@ func plaidTransactionToDB(p plaid.PlaidTransaction, plaidNameToCategoryID map[st
 	}
 
 	// Matches to categories, first by rules then by Plaid primary category.
+	// Rules with plaid_account_id only apply to that account; nil = any account.
 	for _, rule := range rules {
+		if rule.PlaidAccountID != nil && *rule.PlaidAccountID != "" && *rule.PlaidAccountID != p.AccountID {
+			continue
+		}
 		match := strings.ToLower(rule.MatchString)
 		if strings.Contains(name, match) || (merchantName != "" && strings.Contains(merchantName, match)) {
 			categoryID = &rule.CategoryID

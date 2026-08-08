@@ -1473,10 +1473,12 @@ type Category struct {
 }
 
 // Category rule maps transaction name/merchant substring to a category.
+// Optional PlaidAccountID scopes the rule to a single account (nil = any account).
 type CategoryRule struct {
-	ID          int64  `json:"id,omitempty"`
-	MatchString string `json:"match_string"`
-	CategoryID  int64  `json:"category_id"`
+	ID            int64   `json:"id,omitempty"`
+	MatchString   string  `json:"match_string"`
+	CategoryID    int64   `json:"category_id"`
+	PlaidAccountID *string `json:"plaid_account_id,omitempty"`
 }
 
 // Represents a row in the transactions table.
