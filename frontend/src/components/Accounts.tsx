@@ -32,6 +32,8 @@ export function Accounts() {
     void load()
   }, [load])
 
+  const accountGroups = groupAccountsByType(accounts)
+
   // Start editing a row by setting the editing state and draft text.
   const startEditing = (account: Account) => {
     setEditingAccountId(account.accountId)
@@ -155,80 +157,22 @@ export function Accounts() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {accounts.map((account) => {
-                const isEditing = editingAccountId === account.accountId
-                const isSaving = savingAccountId === account.accountId
-
-                return (
-                  <tr
-                    key={account.accountId}
-                    className="hover:bg-zinc-800/30 transition-colors group"
-                  >
-                    <td className="px-6 py-4">
-                      {isEditing ? (
-                        <div className="flex items-center gap-2 max-w-md">
-                          <input
-                            autoFocus
-                            type="text"
-                            value={editValue}
-                            disabled={isSaving}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault()
-                                void saveRename(account.accountId)
-                              } else if (e.key === 'Escape') {
-                                e.preventDefault()
-                                stopEditing()
-                              }
-                            }}
-                            className="flex-1 min-w-0 bg-zinc-800 border border-border rounded-xl px-3 py-1.5 text-white font-bold focus:outline-none focus:ring-2 focus:ring-primary/40"
-                          />
-                          <button
-                            type="button"
-                            disabled={isSaving}
-                            onClick={() => void saveRename(account.accountId)}
-                            className="shrink-0 px-3 py-1.5 rounded-xl bg-primary text-background text-xs font-bold hover:bg-green-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {isSaving ? 'Saving…' : 'Save'}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isSaving}
-                            onClick={stopEditing}
-                            className="shrink-0 px-3 py-1.5 rounded-xl border border-border text-zinc-400 text-xs font-bold hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => startEditing(account)}
-                          className="text-left font-bold text-white group-hover:text-primary transition-colors"
-                          title="Click to rename"
-                        >
-                          {account.name}
-                        </button>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 text-zinc-400 font-medium">
-                      {account.institutionName || '—'}
-                    </td>
-                    <td className="px-6 py-4 text-zinc-400 font-medium capitalize">
-                      {formatType(account)}
-                    </td>
-                    <td className="px-6 py-4 text-zinc-500 font-medium">
-                      {account.mask ? `••••${account.mask}` : '—'}
-                    </td>
-                    <td
-                      className={`px-6 py-4 text-right font-bold tabular-nums ${balanceClassName(account.balanceCents)}`}
-                    >
-                      {formatCurrency(account.balanceCents)}
-                    </td>
-                  </tr>
-                )
-              })}
+              {accountGroups.map((group) => (
+                <AccountGroupRows
+                  key={group.key}
+                  group={group}
+                  editingAccountId={editingAccountId}
+                  savingAccountId={savingAccountId}
+                  editValue={editValue}
+                  setEditValue={setEditValue}
+                  startEditing={startEditing}
+                  stopEditing={stopEditing}
+                  saveRename={saveRename}
+                  formatType={formatType}
+                  formatCurrency={formatCurrency}
+                  balanceClassName={balanceClassName}
+                />
+              ))}
             </tbody>
             <tfoot>
               <tr className="bg-zinc-800/50 border-t border-border">
@@ -250,6 +194,172 @@ export function Accounts() {
       )}
     </div>
   )
+}
+
+// Renders a type section header and its account rows.
+function AccountGroupRows({
+  group,
+  editingAccountId,
+  savingAccountId,
+  editValue,
+  setEditValue,
+  startEditing,
+  stopEditing,
+  saveRename,
+  formatType,
+  formatCurrency,
+  balanceClassName,
+}: AccountGroupRowsProps) {
+  return (
+    <>
+      <tr className="bg-zinc-800/80">
+        <td
+          colSpan={5}
+          className="px-6 py-3 text-xs font-bold text-zinc-300 uppercase tracking-widest"
+        >
+          {group.label}
+        </td>
+      </tr>
+      {group.accounts.map((account) => {
+        const isEditing = editingAccountId === account.accountId
+        const isSaving = savingAccountId === account.accountId
+
+        return (
+          <tr key={account.accountId} className="hover:bg-zinc-800/30 transition-colors group">
+            <td className="px-6 py-4">
+              {isEditing ? (
+                <div className="flex items-center gap-2 max-w-md">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={editValue}
+                    disabled={isSaving}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        void saveRename(account.accountId)
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault()
+                        stopEditing()
+                      }
+                    }}
+                    className="flex-1 min-w-0 bg-zinc-800 border border-border rounded-xl px-3 py-1.5 text-white font-bold focus:outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                  <button
+                    type="button"
+                    disabled={isSaving}
+                    onClick={() => void saveRename(account.accountId)}
+                    className="shrink-0 px-3 py-1.5 rounded-xl bg-primary text-background text-xs font-bold hover:bg-green-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isSaving ? 'Saving…' : 'Save'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSaving}
+                    onClick={stopEditing}
+                    className="shrink-0 px-3 py-1.5 rounded-xl border border-border text-zinc-400 text-xs font-bold hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => startEditing(account)}
+                  className="text-left font-bold text-white group-hover:text-primary transition-colors"
+                  title="Click to rename"
+                >
+                  {account.name}
+                </button>
+              )}
+            </td>
+            <td className="px-6 py-4 text-zinc-400 font-medium">
+              {account.institutionName || '—'}
+            </td>
+            <td className="px-6 py-4 text-zinc-400 font-medium capitalize">
+              {formatType(account)}
+            </td>
+            <td className="px-6 py-4 text-zinc-500 font-medium">
+              {account.mask ? `••••${account.mask}` : '—'}
+            </td>
+            <td
+              className={`px-6 py-4 text-right font-bold tabular-nums ${balanceClassName(account.balanceCents)}`}
+            >
+              {formatCurrency(account.balanceCents)}
+            </td>
+          </tr>
+        )
+      })}
+    </>
+  )
+}
+
+// Groups accounts into Cash / Investments / Credit cards / Other, sorted by name within each.
+function groupAccountsByType(accounts: Account[]): AccountGroup[] {
+  const buckets: Record<AccountGroupKey, Account[]> = {
+    cash: [],
+    investments: [],
+    credit: [],
+    other: [],
+  }
+
+  for (const account of accounts) {
+    switch (account.type) {
+      case 'depository':
+        buckets.cash.push(account)
+        break
+      case 'investment':
+        buckets.investments.push(account)
+        break
+      case 'credit':
+        buckets.credit.push(account)
+        break
+      default:
+        buckets.other.push(account)
+        break
+    }
+  }
+
+  const sortByName = (list: Account[]) =>
+    [...list].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+
+  const sections: { key: AccountGroupKey; label: string }[] = [
+    { key: 'cash', label: 'Cash accounts' },
+    { key: 'investments', label: 'Investments' },
+    { key: 'credit', label: 'Credit cards' },
+    { key: 'other', label: 'Other' },
+  ]
+
+  return sections
+    .map(({ key, label }) => ({
+      key,
+      label,
+      accounts: sortByName(buckets[key]),
+    }))
+    .filter((group) => group.accounts.length > 0)
+}
+
+type AccountGroupKey = 'cash' | 'investments' | 'credit' | 'other'
+
+interface AccountGroup {
+  key: AccountGroupKey
+  label: string
+  accounts: Account[]
+}
+
+interface AccountGroupRowsProps {
+  group: AccountGroup
+  editingAccountId: string | null
+  savingAccountId: string | null
+  editValue: string
+  setEditValue: (value: string) => void
+  startEditing: (account: Account) => void
+  stopEditing: () => void
+  saveRename: (accountId: string) => Promise<void>
+  formatType: (account: Account) => string
+  formatCurrency: (cents: number) => string
+  balanceClassName: (cents: number) => string
 }
 
 interface Account {
