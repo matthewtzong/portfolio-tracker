@@ -88,7 +88,7 @@ export function BudgetBarChart({ title, data, height = 320 }: BudgetBarChartProp
               labelStyle={{ color: '#fff', marginBottom: '4px', fontWeight: 700 }}
               formatter={(value: unknown, name: unknown) =>
                 typeof value === 'number'
-                  ? [formatCurrency(value), name === 'budget' ? 'Budget' : 'Spent']
+                  ? [formatCurrency(value), name === 'Budget' ? 'Budget' : 'Spent']
                   : [String(value), String(name)]
               }
             />

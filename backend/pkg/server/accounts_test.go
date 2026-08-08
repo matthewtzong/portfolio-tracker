@@ -70,7 +70,7 @@ func TestLoadPlaidAccountsNetWorthClassification(t *testing.T) {
 		CurrentBalance: 50.00,
 	}
 
-	_, cashDelta, _, liabilityDelta := loadPlaidAccounts(cashAccount)
+	_, cashDelta, _, liabilityDelta := loadPlaidAccounts(cashAccount, nil)
 	if cashDelta != 10000 {
 		t.Errorf("cash account cashDelta = %d, want %d", cashDelta, 10000)
 	}
@@ -78,7 +78,7 @@ func TestLoadPlaidAccountsNetWorthClassification(t *testing.T) {
 		t.Errorf("cash account liabilityDelta = %d, want %d", liabilityDelta, 0)
 	}
 
-	accountJSON, cashDelta, _, liabilityDelta := loadPlaidAccounts(creditAccount)
+	accountJSON, cashDelta, _, liabilityDelta := loadPlaidAccounts(creditAccount, nil)
 	if !accountJSON.IsLiability {
 		t.Errorf("credit account IsLiability = false, want true")
 	}
@@ -123,17 +123,17 @@ func TestNetWorthFormulaWithPlaid(t *testing.T) {
 
 	var cashCents, liabilitiesCents, investmentsCents int64
 
-	_, cashDelta1, investDelta1, liabilityDelta1 := loadPlaidAccounts(plaidCash)
+	_, cashDelta1, investDelta1, liabilityDelta1 := loadPlaidAccounts(plaidCash, nil)
 	cashCents += cashDelta1
 	investmentsCents += investDelta1
 	liabilitiesCents += liabilityDelta1
 
-	_, cashDelta2, investDelta2, liabilityDelta2 := loadPlaidAccounts(plaidCredit)
+	_, cashDelta2, investDelta2, liabilityDelta2 := loadPlaidAccounts(plaidCredit, nil)
 	cashCents += cashDelta2
 	investmentsCents += investDelta2
 	liabilitiesCents += liabilityDelta2
 
-	_, cashDelta3, investDelta3, liabilityDelta3 := loadPlaidAccounts(plaidInvestment)
+	_, cashDelta3, investDelta3, liabilityDelta3 := loadPlaidAccounts(plaidInvestment, nil)
 	cashCents += cashDelta3
 	investmentsCents += investDelta3
 	liabilitiesCents += liabilityDelta3
@@ -184,11 +184,11 @@ func TestNetWorthFormulaWithPlaidAndSnaptrade(t *testing.T) {
 
 	var cashCents, liabilitiesCents, investmentsCents int64
 
-	_, cashDelta1, _, liabilityDelta1 := loadPlaidAccounts(plaidCash)
+	_, cashDelta1, _, liabilityDelta1 := loadPlaidAccounts(plaidCash, nil)
 	cashCents += cashDelta1
 	liabilitiesCents += liabilityDelta1
 
-	_, cashDelta2, _, liabilityDelta2 := loadPlaidAccounts(plaidCredit)
+	_, cashDelta2, _, liabilityDelta2 := loadPlaidAccounts(plaidCredit, nil)
 	cashCents += cashDelta2
 	liabilitiesCents += liabilityDelta2
 

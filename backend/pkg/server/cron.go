@@ -343,7 +343,7 @@ func maybeWriteMonthlyNetWorth(r *http.Request, deps apiDependencies, date time.
 		}
 
 		foundAny = true
-		_, cashDelta, investDelta, liabilityDelta := loadPlaidAccounts(account)
+		_, cashDelta, investDelta, liabilityDelta := loadPlaidAccounts(account, nil)
 		cashCents += cashDelta
 		investmentsCents += investDelta
 		liabilitiesCents += liabilityDelta

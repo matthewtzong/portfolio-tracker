@@ -6,6 +6,7 @@ import { ProtectedRoute } from './components/ProtectedRoute'
 import { LinkManagement } from './components/LinkManagement'
 import { BudgetTracker } from './components/BudgetTracker'
 import { Portfolio } from './components/Portfolio'
+import { Accounts } from './components/Accounts'
 import { MainLayout } from './components/MainLayout'
 
 /**
@@ -14,6 +15,7 @@ Route graph:
  - `/dashboard`: protected main app shell
  - `/`: redirects to `/dashboard` (which will bounce unauthenticated users to `/auth`)
  - `/links`: protected link management page
+ - `/accounts`: protected Plaid accounts list (balances + rename)
  - `/expenses`: protected expense tracker (transactions by month/category)
  - `/budget`: protected budget tracker (global budgets, monthly spent vs budget)
  - `/portfolio`: protected portfolio view (holdings, daily/monthly snapshots)
@@ -32,6 +34,7 @@ function App() {
         >
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
+          <Route path="accounts" element={<Accounts />} />
           <Route path="links" element={<LinkManagement />} />
           <Route path="expenses" element={<ExpenseTracker />} />
           <Route path="budget" element={<BudgetTracker />} />

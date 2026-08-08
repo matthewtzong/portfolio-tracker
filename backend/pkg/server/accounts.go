@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/matthewtzong/portfolio-tracker/backend/pkg/database"
@@ -13,15 +14,16 @@ import (
 
 // Account View Model
 type AccountJSON struct {
-	Provider     string  `json:"provider"`
-	PlaidItemID  *string `json:"plaidItemId,omitempty"`
-	AccountID    string  `json:"accountId"`
-	Name         string  `json:"name"`
-	Mask         *string `json:"mask,omitempty"`
-	Type         string  `json:"type"`
-	Subtype      *string `json:"subtype,omitempty"`
-	BalanceCents int64   `json:"balanceCents"`
-	IsLiability  bool    `json:"isLiability"`
+	Provider        string  `json:"provider"`
+	PlaidItemID     *string `json:"plaidItemId,omitempty"`
+	AccountID       string  `json:"accountId"`
+	Name            string  `json:"name"`
+	InstitutionName *string `json:"institutionName,omitempty"`
+	Mask            *string `json:"mask,omitempty"`
+	Type            string  `json:"type"`
+	Subtype         *string `json:"subtype,omitempty"`
+	BalanceCents    int64   `json:"balanceCents"`
+	IsLiability     bool    `json:"isLiability"`
 }
 
 // List of Accounts and Net Worth breakdown.
@@ -33,6 +35,18 @@ type AccountsResponse struct {
 	LiabilitiesCents int64         `json:"liabilitiesCents"`
 }
 
+// Request body for renaming a Plaid account.
+type renameAccountRequest struct {
+	AccountID   string `json:"accountId"`
+	DisplayName string `json:"displayName"`
+}
+
+// Response after renaming a Plaid account.
+type renameAccountResponse struct {
+	AccountID string `json:"accountId"`
+	Name      string `json:"name"`
+}
+
 // Registers the accounts route.
 func registerAccountsRoutes(mux *http.ServeMux, deps apiDependencies) {
 	// GET /api/accounts returns all accounts and the current net worth breakdown.
@@ -42,6 +56,15 @@ func registerAccountsRoutes(mux *http.ServeMux, deps apiDependencies) {
 			return
 		}
 		handleGetAccounts(w, r, deps)
+	})))
+
+	// PATCH /api/accounts/rename updates the client-side display name for an account.
+	mux.Handle("/api/accounts/rename", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			methodNotAllowed(w, http.MethodPatch)
+			return
+		}
+		handleRenameAccount(w, r, deps)
 	})))
 
 	// GET /api/net-worth/snapshots returns monthly net worth snapshots over time.
@@ -76,6 +99,19 @@ func handleGetAccounts(w http.ResponseWriter, r *http.Request, deps apiDependenc
 		return
 	}
 
+	// Map institution names by Plaid item_id for the accounts list.
+	institutionByItemID := make(map[string]string)
+	plaidItems, err := deps.db.ListPlaidItems(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to list Plaid items: "+err.Error())
+		return
+	}
+	for _, item := range plaidItems {
+		if item.InstitutionName != nil && *item.InstitutionName != "" {
+			institutionByItemID[item.ItemID] = *item.InstitutionName
+		}
+	}
+
 	// Converts the Plaid accounts to the AccountJSON view model.
 	// Plaid accounts contribute to cash (HYSA, checking, CDs), liabilities (credit cards), and investments (stocks, ETFs, etc).
 	accounts := make([]AccountJSON, 0)
@@ -85,7 +121,11 @@ func handleGetAccounts(w http.ResponseWriter, r *http.Request, deps apiDependenc
 		liabilitiesCents int64
 	)
 	for _, account := range plaidAccounts {
-		accountJSON, cashDelta, investmentsDelta, liabilityDelta := loadPlaidAccounts(account)
+		var institutionName *string
+		if name, ok := institutionByItemID[account.PlaidItemID]; ok {
+			institutionName = &name
+		}
+		accountJSON, cashDelta, investmentsDelta, liabilityDelta := loadPlaidAccounts(account, institutionName)
 		accounts = append(accounts, accountJSON)
 		cashCents += cashDelta
 		investmentsCents += investmentsDelta
@@ -105,6 +145,64 @@ func handleGetAccounts(w http.ResponseWriter, r *http.Request, deps apiDependenc
 
 	// Return the accounts and net worth breakdown.
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// Renames a Plaid account by saving a client-side display_name.
+func handleRenameAccount(w http.ResponseWriter, r *http.Request, deps apiDependencies) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if deps.db == nil {
+		writeJSONError(w, http.StatusInternalServerError, "database is not configured")
+		return
+	}
+
+	if userID, ok := serverauth.UserIDFromContext(r.Context()); !ok || userID == "" {
+		writeJSONError(w, http.StatusUnauthorized, "missing authenticated user")
+		return
+	}
+
+	var req renameAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	accountID := strings.TrimSpace(req.AccountID)
+	if accountID == "" {
+		writeJSONError(w, http.StatusBadRequest, "accountId is required")
+		return
+	}
+
+	existing, err := deps.db.GetPlaidAccountByAccountID(r.Context(), accountID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to get Plaid account: "+err.Error())
+		return
+	}
+	if existing == nil {
+		writeJSONError(w, http.StatusNotFound, "Plaid account not found")
+		return
+	}
+
+	trimmedName := strings.TrimSpace(req.DisplayName)
+	var displayName *string
+	if trimmedName != "" {
+		displayName = &trimmedName
+	}
+
+	if err := deps.db.UpdatePlaidAccountDisplayName(r.Context(), accountID, displayName); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to update account name: "+err.Error())
+		return
+	}
+
+	effectiveName := existing.Name
+	if displayName != nil {
+		effectiveName = *displayName
+	}
+
+	_ = json.NewEncoder(w).Encode(renameAccountResponse{
+		AccountID: accountID,
+		Name:      effectiveName,
+	})
 }
 
 // Returns monthly net worth snapshots over time.
@@ -149,7 +247,7 @@ func handleGetNetWorthSnapshots(w http.ResponseWriter, r *http.Request, deps api
 }
 
 // Load Plaid Accounts from the database
-func loadPlaidAccounts(a database.PlaidAccount) (AccountJSON, int64, int64, int64) {
+func loadPlaidAccounts(a database.PlaidAccount, institutionName *string) (AccountJSON, int64, int64, int64) {
 	var (
 		subtype *string
 		mask    *string
@@ -183,17 +281,24 @@ func loadPlaidAccounts(a database.PlaidAccount) (AccountJSON, int64, int64, int6
 		cashDelta = rawCents
 	}
 
+	// Prefer client display_name when set; otherwise use Plaid's name.
+	name := a.Name
+	if a.DisplayName != nil && strings.TrimSpace(*a.DisplayName) != "" {
+		name = strings.TrimSpace(*a.DisplayName)
+	}
+
 	// Converts the Plaid account to the AccountJSON view model.
 	account := AccountJSON{
-		Provider:     "plaid",
-		PlaidItemID:  &a.PlaidItemID,
-		AccountID:    a.AccountID,
-		Name:         a.Name,
-		Mask:         mask,
-		Type:         a.Type,
-		Subtype:      subtype,
-		BalanceCents: balanceCents,
-		IsLiability:  isLiability,
+		Provider:        "plaid",
+		PlaidItemID:     &a.PlaidItemID,
+		AccountID:       a.AccountID,
+		Name:            name,
+		InstitutionName: institutionName,
+		Mask:            mask,
+		Type:            a.Type,
+		Subtype:         subtype,
+		BalanceCents:    balanceCents,
+		IsLiability:     isLiability,
 	}
 
 	return account, cashDelta, investDelta, liabilityDelta

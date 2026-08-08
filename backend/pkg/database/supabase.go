@@ -351,6 +351,58 @@ func (c *Client) ListPlaidAccounts(ctx context.Context) ([]PlaidAccount, error) 
 	return accounts, nil
 }
 
+// Returns a Plaid account by its Plaid account_id.
+func (c *Client) GetPlaidAccountByAccountID(ctx context.Context, accountID string) (*PlaidAccount, error) {
+	if accountID == "" {
+		return nil, errors.New("plaid account_id must be non-empty")
+	}
+
+	reqURL := c.restURL("plaid_accounts") + "?account_id=eq." + url.QueryEscape(accountID)
+	resp, err := c.doRequest(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get plaid_account failed: %s", string(body))
+	}
+
+	var accounts []PlaidAccount
+	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
+		return nil, err
+	}
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+	return &accounts[0], nil
+}
+
+// Updates the display_name for a Plaid account. Pass nil to clear the custom name.
+func (c *Client) UpdatePlaidAccountDisplayName(ctx context.Context, accountID string, displayName *string) error {
+	if accountID == "" {
+		return errors.New("plaid account_id must be non-empty for display name update")
+	}
+
+	payload := map[string]interface{}{
+		"display_name": displayName,
+	}
+
+	reqURL := c.restURL("plaid_accounts") + "?account_id=eq." + url.QueryEscape(accountID)
+	resp, err := c.doRequest(ctx, http.MethodPatch, reqURL, payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase update plaid_account display_name failed: %s", string(body))
+	}
+	return nil
+}
+
 /*
 // Converts a SnaptradeConnection to its JSON-safe representation.
 func (s *SnaptradeConnection) ToJSON() SnaptradeConnectionJSON {
@@ -1378,6 +1430,7 @@ type PlaidAccount struct {
 	PlaidItemID    string     `json:"plaid_item_id"`
 	AccountID      string     `json:"account_id"`
 	Name           string     `json:"name"`
+	DisplayName    *string    `json:"display_name,omitempty"`
 	Mask           *string    `json:"mask,omitempty"`
 	Type           string     `json:"type"`
 	Subtype        *string    `json:"subtype,omitempty"`
