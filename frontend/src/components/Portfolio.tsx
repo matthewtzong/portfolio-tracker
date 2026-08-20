@@ -100,14 +100,14 @@ export function Portfolio() {
   const [yearlySummaryLoading, setYearlySummaryLoading] = useState(false)
   const [yearlySummaryError, setYearlySummaryError] = useState<string | null>(null)
 
-  const [uploadMessage, setUploadMessage] = useState<{
-    text: string
-    type: 'success' | 'error'
-  } | null>(null)
-  const [uploadLoading, setUploadLoading] = useState(false)
-  const [fidelityAccountType, setFidelityAccountType] = useState<'brokerage' | 'roth_ira'>(
-    'brokerage',
-  )
+  // const [uploadMessage, setUploadMessage] = useState<{
+  //   text: string
+  //   type: 'success' | 'error'
+  // } | null>(null)
+  // const [uploadLoading, setUploadLoading] = useState(false)
+  // const [fidelityAccountType, setFidelityAccountType] = useState<'brokerage' | 'roth_ira'>(
+  //   'brokerage',
+  // )
 
   // Loads the holdings.
   const loadHoldings = useCallback(async () => {
@@ -357,58 +357,58 @@ export function Portfolio() {
     }
   }
 
-  const handleFidelityUpload = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-    type: 'statement' | 'holdings',
-  ) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+  // const handleFidelityUpload = async (
+  //   e: React.ChangeEvent<HTMLInputElement>,
+  //   type: 'statement' | 'holdings',
+  // ) => {
+  //   const file = e.target.files?.[0]
+  //   if (!file) return
 
-    setUploadLoading(true)
-    setUploadMessage(null)
+  //   setUploadLoading(true)
+  //   setUploadMessage(null)
 
-    // Uploads the file.
-    try {
-      const { supabase } = await import('../lib/supabase')
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('accountType', fidelityAccountType)
+  //   // Uploads the file.
+  //   try {
+  //     const { supabase } = await import('../lib/supabase')
+  //     const {
+  //       data: { session },
+  //     } = await supabase.auth.getSession()
+  //     const formData = new FormData()
+  //     formData.append('file', file)
+  //     formData.append('accountType', fidelityAccountType)
 
-      const API_URL = import.meta.env.VITE_API_URL || ''
-      const endpoint =
-        type === 'statement' ? '/api/fidelity/upload-statement' : '/api/fidelity/upload-holdings'
+  //     const API_URL = import.meta.env.VITE_API_URL || ''
+  //     const endpoint =
+  //       type === 'statement' ? '/api/fidelity/upload-statement' : '/api/fidelity/upload-holdings'
 
-      const response = await fetch(`${API_URL}${endpoint}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${session?.access_token}`,
-        },
-        body: formData,
-      })
+  //     const response = await fetch(`${API_URL}${endpoint}`, {
+  //       method: 'POST',
+  //       headers: {
+  //         Authorization: `Bearer ${session?.access_token}`,
+  //       },
+  //       body: formData,
+  //     })
 
-      // Parses the response.
-      const result = await response.json()
-      if (!response.ok) {
-        throw new Error(result.error || 'Upload failed')
-      }
+  //     // Parses the response.
+  //     const result = await response.json()
+  //     if (!response.ok) {
+  //       throw new Error(result.error || 'Upload failed')
+  //     }
 
-      // Sets the upload message.
-      setUploadMessage({ text: result.message, type: 'success' })
-      await loadHoldings()
-      await loadSnapshots()
-    } catch (err) {
-      setUploadMessage({
-        text: err instanceof Error ? err.message : 'Upload failed',
-        type: 'error',
-      })
-    } finally {
-      setUploadLoading(false)
-      e.target.value = ''
-    }
-  }
+  //     // Sets the upload message.
+  //     setUploadMessage({ text: result.message, type: 'success' })
+  //     await loadHoldings()
+  //     await loadSnapshots()
+  //   } catch (err) {
+  //     setUploadMessage({
+  //       text: err instanceof Error ? err.message : 'Upload failed',
+  //       type: 'error',
+  //     })
+  //   } finally {
+  //     setUploadLoading(false)
+  //     e.target.value = ''
+  //   }
+  // }
 
   // Generates month options for export dropdown (last 13 months including current).
   const generateMonthOptions = () => {
@@ -488,7 +488,7 @@ export function Portfolio() {
         )}
       </div>
 
-      {/* Fidelity Manual Uploads */}
+      {/* Fidelity Manual Uploads
       <div className="mb-8 p-8 bg-zinc-900 border border-border rounded-4xl shadow-xl relative overflow-hidden group">
         <div className="absolute -right-4 -top-4 w-24 h-24 bg-blue-500/5 rounded-full blur-2xl group-hover:bg-blue-500/10 transition-all" />
         <div className="relative">
@@ -587,7 +587,7 @@ export function Portfolio() {
             </div>
           )}
         </div>
-      </div>
+      </div> */}
 
       {/* By account and by holding — selectable */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">

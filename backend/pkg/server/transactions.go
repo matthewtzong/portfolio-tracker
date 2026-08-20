@@ -724,6 +724,15 @@ type yearlyExpenseCategoryJSON struct {
 	TransactionCount int    `json:"transactionCount"`
 }
 
+// Add day over day and month over month deltas, top holding gainers/losers from daily holdings
+// Update portfolio to show both the allocations for each stock/etf and allow toggle to include
+// Cash or not (effectively net worth but categorize by asset class), an example also is that if
+// two diff accounts have the same stock, it should be added together and show allocation for combined amount
+
+// Also allow me to set target allocation/concentration amounts that I want, like for example 50% VOO, 20% Other ETFs, 20% single stocks?
+// And maybe highlight warnings for example if a ticker is above the concentration by a certain amount
+// Or maybe show a warning if any single stock is above a certain amount? give me your thoughts
+
 // Yearly expense summary response.
 type yearlyExpenseSummaryResponse struct {
 	Year       int                         `json:"year"`

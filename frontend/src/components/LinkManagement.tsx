@@ -292,7 +292,7 @@ export function LinkManagement() {
             )}
           </section>
 
-          <section>
+          {/* <section>
             <div className="flex items-center gap-3 mb-6">
               <h2 className="text-xl font-bold text-white">Manual Connections</h2>
               <span className="bg-zinc-800 text-zinc-500 px-2 py-0.5 rounded-md text-[10px] font-bold border border-border">
@@ -344,7 +344,7 @@ export function LinkManagement() {
                 </table>
               </div>
             )}
-          </section>
+          </section> */}
         </div>
       )}
     </div>

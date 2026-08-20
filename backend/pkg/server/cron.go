@@ -454,7 +454,7 @@ func runRetentionJob(ctx context.Context, deps apiDependencies, date time.Time) 
 	}
 	accountMap := make(map[string]string)
 	for _, account := range accounts {
-		accountMap[account.AccountID] = account.Name
+		accountMap[account.AccountID] = plaidAccountDisplayName(account)
 	}
 
 	// Builds the CSV for the yearly monthly snapshots.

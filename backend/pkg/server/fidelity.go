@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/matthewtzong/portfolio-tracker/backend/pkg/database"
-	"github.com/matthewtzong/portfolio-tracker/backend/pkg/serverauth"
+// 	"github.com/matthewtzong/portfolio-tracker/backend/pkg/serverauth"
 )
 
 const (
@@ -27,25 +27,25 @@ const (
 )
 
 // Registers Fidelity routes.
-func registerFidelityRoutes(mux *http.ServeMux, deps apiDependencies) {
-	// Upload monthly statement CSV.
-	mux.Handle("/api/fidelity/upload-statement", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, http.MethodPost)
-			return
-		}
-		handleFidelityMonthlyUpload(w, r, deps)
-	})))
+// func registerFidelityRoutes(mux *http.ServeMux, deps apiDependencies) {
+// 	// Upload monthly statement CSV.
+// 	mux.Handle("/api/fidelity/upload-statement", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// 		if r.Method != http.MethodPost {
+// 			methodNotAllowed(w, http.MethodPost)
+// 			return
+// 		}
+// 		handleFidelityMonthlyUpload(w, r, deps)
+// 	})))
 
-	// Upload current holdings CSV.
-	mux.Handle("/api/fidelity/upload-holdings", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, http.MethodPost)
-			return
-		}
-		handleFidelityHoldingsUpload(w, r, deps)
-	})))
-}
+// 	// Upload current holdings CSV.
+// 	mux.Handle("/api/fidelity/upload-holdings", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// 		if r.Method != http.MethodPost {
+// 			methodNotAllowed(w, http.MethodPost)
+// 			return
+// 		}
+// 		handleFidelityHoldingsUpload(w, r, deps)
+// 	})))
+// }
 
 // Maps the upload accountType form value to a Fidelity account_id and display name.
 func resolveFidelityAccountID(accountType string) (accountID, displayName string, err error) {

@@ -281,18 +281,12 @@ func loadPlaidAccounts(a database.PlaidAccount, institutionName *string) (Accoun
 		cashDelta = rawCents
 	}
 
-	// Prefer client display_name when set; otherwise use Plaid's name.
-	name := a.Name
-	if a.DisplayName != nil && strings.TrimSpace(*a.DisplayName) != "" {
-		name = strings.TrimSpace(*a.DisplayName)
-	}
-
 	// Converts the Plaid account to the AccountJSON view model.
 	account := AccountJSON{
 		Provider:        "plaid",
 		PlaidItemID:     &a.PlaidItemID,
 		AccountID:       a.AccountID,
-		Name:            name,
+		Name:            plaidAccountDisplayName(a),
 		InstitutionName: institutionName,
 		Mask:            mask,
 		Type:            a.Type,
@@ -302,6 +296,14 @@ func loadPlaidAccounts(a database.PlaidAccount, institutionName *string) (Accoun
 	}
 
 	return account, cashDelta, investDelta, liabilityDelta
+}
+
+// Returns the user-facing account name: custom display_name when set, else Plaid name.
+func plaidAccountDisplayName(a database.PlaidAccount) string {
+	if a.DisplayName != nil && strings.TrimSpace(*a.DisplayName) != "" {
+		return strings.TrimSpace(*a.DisplayName)
+	}
+	return a.Name
 }
 
 // Returns true if the Plaid account should be treated as an investment.

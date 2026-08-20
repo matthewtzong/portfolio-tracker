@@ -133,7 +133,7 @@ func handleGetHoldings(w http.ResponseWriter, r *http.Request, deps apiDependenc
 	}
 	accountNameMap := make(map[string]string)
 	for _, a := range plaidAccounts {
-		accountNameMap[a.AccountID] = a.Name
+		accountNameMap[a.AccountID] = plaidAccountDisplayName(a)
 	}
 
 	// Loop through all accounts and fetch the latest holdings for each account.
@@ -416,7 +416,7 @@ func handleGetHoldingsHistory(w http.ResponseWriter, r *http.Request, deps apiDe
 	plaidAccounts, _ := deps.db.ListPlaidAccounts(r.Context())
 	accountMap := make(map[string]string)
 	for _, account := range plaidAccounts {
-		accountMap[account.AccountID] = account.Name
+		accountMap[account.AccountID] = plaidAccountDisplayName(account)
 	}
 	// Group holdings by date for easier iteration.
 	holdingsByDate := make(map[string][]database.DailyHolding)

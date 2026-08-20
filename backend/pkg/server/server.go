@@ -105,7 +105,7 @@ func NewHandler() (http.Handler, error) {
 	registerPortfolioRoutes(mux, deps)
 	registerCronRoutes(mux, deps)
 	registerExportRoutes(mux, deps)
-	registerFidelityRoutes(mux, deps)
+	// registerFidelityRoutes(mux, deps)
 
 	return withCORS(mux), nil
 }

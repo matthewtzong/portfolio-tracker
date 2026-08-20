@@ -7,6 +7,28 @@ import (
 	// "github.com/matthewtzong/portfolio-tracker/backend/pkg/snaptrade"
 )
 
+func TestPlaidAccountDisplayName(t *testing.T) {
+	custom := "My Brokerage"
+	account := database.PlaidAccount{
+		Name:        "Plaid Brokerage ****1234",
+		DisplayName: &custom,
+	}
+	if got := plaidAccountDisplayName(account); got != custom {
+		t.Errorf("plaidAccountDisplayName with display_name = %q, want %q", got, custom)
+	}
+
+	account.DisplayName = nil
+	if got := plaidAccountDisplayName(account); got != account.Name {
+		t.Errorf("plaidAccountDisplayName without display_name = %q, want %q", got, account.Name)
+	}
+
+	blank := "   "
+	account.DisplayName = &blank
+	if got := plaidAccountDisplayName(account); got != account.Name {
+		t.Errorf("plaidAccountDisplayName with blank display_name = %q, want %q", got, account.Name)
+	}
+}
+
 func TestIsPlaidLiability(t *testing.T) {
 	tests := []struct {
 		accountType string

@@ -99,7 +99,7 @@ func handleExportPortfolioSnapshots(w http.ResponseWriter, r *http.Request, deps
 	}
 	accountMap := make(map[string]string)
 	for _, acc := range accounts {
-		accountMap[acc.AccountID] = acc.Name
+		accountMap[acc.AccountID] = plaidAccountDisplayName(acc)
 	}
 
 	// Builds the CSV for the monthly snapshots.
@@ -148,7 +148,7 @@ func handleExportPortfolioHoldings(w http.ResponseWriter, r *http.Request, deps 
 
 	accountMap := make(map[string]string)
 	for _, acc := range allAccounts {
-		accountMap[acc.AccountID] = acc.Name
+		accountMap[acc.AccountID] = plaidAccountDisplayName(acc)
 	}
 
 	// Set CSV headers and write CSV.
