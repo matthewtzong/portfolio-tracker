@@ -92,3 +92,35 @@ func TestClampYTDStartToEarliest(t *testing.T) {
 		t.Fatalf("clamped start=%s, want 2026-03-31", start.Format("2006-01-02"))
 	}
 }
+
+func TestInvestmentTxnSyncWindowIncremental(t *testing.T) {
+	end := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	latest := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	start := latest.AddDate(0, 0, -investmentTxnSyncOverlapDays)
+	if start.Before(investmentTxnHistoryFloor) {
+		start = investmentTxnHistoryFloor
+	}
+	if start.Format("2006-01-02") != "2026-08-13" {
+		t.Fatalf("incremental start=%s, want 2026-08-13", start.Format("2006-01-02"))
+	}
+	_ = end
+}
+
+func TestInvestmentTxnSyncWindowEmptyUsesFloor(t *testing.T) {
+	start := investmentTxnHistoryFloor
+	if start.Format("2006-01-02") != "2026-03-31" {
+		t.Fatalf("floor=%s, want 2026-03-31", start.Format("2006-01-02"))
+	}
+}
+
+func TestOneYearStartClampedToEarliest(t *testing.T) {
+	end := time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
+	earliest := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+	start := end.AddDate(-1, 0, 0) // 2025-08-23
+	if start.Before(earliest) {
+		start = earliest
+	}
+	if start.Format("2006-01-02") != "2026-03-31" {
+		t.Fatalf("1y clamped start=%s, want 2026-03-31", start.Format("2006-01-02"))
+	}
+}

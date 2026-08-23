@@ -124,7 +124,7 @@ export function Portfolio() {
   const [yearlySummaryLoading, setYearlySummaryLoading] = useState(false)
   const [yearlySummaryError, setYearlySummaryError] = useState<string | null>(null)
 
-  const [perfRange, setPerfRange] = useState<'all' | 'ytd'>('all')
+  const [perfRange, setPerfRange] = useState<'all' | '1y' | 'ytd'>('all')
   const [performance, setPerformance] = useState<PerformanceResponse | null>(null)
   const [performanceLoading, setPerformanceLoading] = useState(false)
   const [performanceError, setPerformanceError] = useState<string | null>(null)
@@ -169,7 +169,7 @@ export function Portfolio() {
   }, [])
 
   // Loads contribution-adjusted performance (Modified Dietz).
-  const loadPerformance = useCallback(async (range: 'all' | 'ytd') => {
+  const loadPerformance = useCallback(async (range: 'all' | '1y' | 'ytd') => {
     setPerformanceLoading(true)
     setPerformanceError(null)
     try {
@@ -550,7 +550,7 @@ export function Portfolio() {
               that stayed as cash).
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => setPerfRange('all')}
@@ -561,6 +561,17 @@ export function Portfolio() {
               }`}
             >
               All time
+            </button>
+            <button
+              type="button"
+              onClick={() => setPerfRange('1y')}
+              className={`px-4 py-2 text-sm font-bold rounded-full transition-all ${
+                perfRange === '1y'
+                  ? 'bg-primary text-background'
+                  : 'bg-zinc-900 text-zinc-300 border border-border hover:border-zinc-500'
+              }`}
+            >
+              1 year
             </button>
             <button
               type="button"

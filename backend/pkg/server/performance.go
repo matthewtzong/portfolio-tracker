@@ -107,7 +107,14 @@ func modifiedDietz(startValue, endValue int64, startDate, endDate time.Time, flo
 	return result
 }
 
-// Syncs investment transactions from Plaid for all items (up to ~24 months back).
+// App data floor — matches frontend START_MONTH (2026-03). Never sync or use txns before this.
+var investmentTxnHistoryFloor = time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+
+const investmentTxnSyncOverlapDays = 7
+
+// Syncs investment transactions from Plaid.
+// First run (empty table): backfill from history floor → endDate.
+// Later runs: only fetch from (latest stored date − overlap) → endDate.
 func syncInvestmentTransactions(ctx context.Context, deps apiDependencies, endDate time.Time) (int, error) {
 	if deps.db == nil || deps.plaidClient == nil {
 		return 0, nil
@@ -118,9 +125,25 @@ func syncInvestmentTransactions(ctx context.Context, deps apiDependencies, endDa
 		return 0, err
 	}
 
-	startDate := endDate.AddDate(-2, 0, 0)
-	startStr := startDate.Format("2006-01-02")
-	endStr := endDate.Format("2006-01-02")
+	endDay := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, time.UTC)
+	startDay := investmentTxnHistoryFloor
+
+	latest, err := deps.db.GetLatestInvestmentTransactionDate(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if latest != nil {
+		startDay = latest.AddDate(0, 0, -investmentTxnSyncOverlapDays)
+		if startDay.Before(investmentTxnHistoryFloor) {
+			startDay = investmentTxnHistoryFloor
+		}
+	}
+	if startDay.After(endDay) {
+		return 0, nil
+	}
+
+	startStr := startDay.Format("2006-01-02")
+	endStr := endDay.Format("2006-01-02")
 	upserted := 0
 
 	for _, item := range items {
@@ -150,6 +173,9 @@ func syncInvestmentTransactions(ctx context.Context, deps apiDependencies, endDa
 		for _, t := range txns {
 			date, err := time.Parse("2006-01-02", t.Date)
 			if err != nil {
+				continue
+			}
+			if date.Before(investmentTxnHistoryFloor) {
 				continue
 			}
 			row := database.InvestmentTransaction{
@@ -191,13 +217,53 @@ func syncInvestmentTransactions(ctx context.Context, deps apiDependencies, endDa
 	return upserted, nil
 }
 
-// Resolves portfolio value on or nearest to date using daily then monthly snapshots.
-// Monthly rows are stored as end-of-month dates (e.g. 2026-03-31), so monthly lookup
-// uses the full calendar month range rather than the 1st alone.
+// Resolves portfolio value on or nearest to date.
+// Prefers sum of daily_holdings (real positions) over snapshots, which may have been
+// gap-filled with live account balances on historical dates.
 func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date time.Time) (int64, time.Time, error) {
 	day := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
 
-	// Prefer exact daily snapshot.
+	// Prefer exact holdings sum for that day.
+	if sum, ok, err := sumDailyHoldingsOnDate(ctx, db, day); err != nil {
+		return 0, time.Time{}, err
+	} else if ok {
+		return sum, day, nil
+	}
+
+	// Nearest holdings date within ±7 days.
+	windowStart := day.AddDate(0, 0, -7)
+	windowEnd := day.AddDate(0, 0, 7)
+	nearbyHoldings, err := db.ListDailyHoldings(ctx, windowStart, windowEnd)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if len(nearbyHoldings) > 0 {
+		byDate := make(map[string]int64)
+		for _, h := range nearbyHoldings {
+			key := h.Date.Time.Format("2006-01-02")
+			byDate[key] += h.ValueCents
+		}
+		var bestDate time.Time
+		bestDist := int64(1 << 60)
+		var bestSum int64
+		for key, sum := range byDate {
+			d, err := time.Parse("2006-01-02", key)
+			if err != nil {
+				continue
+			}
+			dist := daysBetweenAbs(d, day)
+			if dist < bestDist {
+				bestDist = dist
+				bestDate = d
+				bestSum = sum
+			}
+		}
+		if !bestDate.IsZero() {
+			return bestSum, bestDate, nil
+		}
+	}
+
+	// Fall back to daily snapshots.
 	dailies, err := db.ListDailySnapshots(ctx, day, day)
 	if err != nil {
 		return 0, time.Time{}, err
@@ -206,9 +272,6 @@ func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date t
 		return dailies[0].PortfolioValueCents, dailies[0].Date.Time, nil
 	}
 
-	// Nearest daily within ±7 days.
-	windowStart := day.AddDate(0, 0, -7)
-	windowEnd := day.AddDate(0, 0, 7)
 	nearby, err := db.ListDailySnapshots(ctx, windowStart, windowEnd)
 	if err != nil {
 		return 0, time.Time{}, err
@@ -233,7 +296,6 @@ func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date t
 		return 0, time.Time{}, err
 	}
 	if monthDate.IsZero() {
-		// Try previous calendar month.
 		prev := day.AddDate(0, -1, 0)
 		sum, monthDate, err = sumMonthlyForCalendarMonth(ctx, db, prev.Year(), prev.Month())
 		if err != nil {
@@ -244,6 +306,21 @@ func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date t
 		return 0, time.Time{}, nil
 	}
 	return sum, monthDate, nil
+}
+
+func sumDailyHoldingsOnDate(ctx context.Context, db *database.Client, day time.Time) (int64, bool, error) {
+	holdings, err := db.ListDailyHoldings(ctx, day, day)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(holdings) == 0 {
+		return 0, false, nil
+	}
+	var sum int64
+	for _, h := range holdings {
+		sum += h.ValueCents
+	}
+	return sum, true, nil
 }
 
 // Sums monthly_snapshots for a calendar month. Months are stored as last-day dates.
@@ -281,31 +358,33 @@ func daysBetweenAbs(a, b time.Time) int64 {
 	return int64(hours / 24)
 }
 
-// Finds the earliest date we can use as all-time start (daily preferred, else monthly).
+// Finds the earliest performance start: monthly first (long history), else daily
+// holdings / daily snapshots (portfolio only exists in the current month).
 func earliestPerformanceStart(ctx context.Context, db *database.Client) (time.Time, error) {
-	earliestDaily, err := db.GetEarliestDailySnapshot(ctx)
-	if err != nil {
-		return time.Time{}, err
-	}
 	earliestMonthly, err := db.GetEarliestMonthlySnapshot(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}
-	switch {
-	case earliestDaily != nil && earliestMonthly != nil:
-		d := earliestDaily.Date.Time
-		m := earliestMonthly.Month.Time
-		if d.Before(m) {
-			return d, nil
-		}
-		return m, nil
-	case earliestDaily != nil:
-		return earliestDaily.Date.Time, nil
-	case earliestMonthly != nil:
+	if earliestMonthly != nil {
 		return earliestMonthly.Month.Time, nil
-	default:
-		return time.Time{}, nil
 	}
+
+	holdingsDate, err := db.GetEarliestDailyHoldingsDate(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if holdingsDate != nil {
+		return *holdingsDate, nil
+	}
+
+	earliestDaily, err := db.GetEarliestDailySnapshot(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if earliestDaily != nil {
+		return earliestDaily.Date.Time, nil
+	}
+	return time.Time{}, nil
 }
 
 type performanceResponseJSON struct {
@@ -356,14 +435,19 @@ func handleGetPortfolioPerformance(w http.ResponseWriter, r *http.Request, deps 
 	switch rangeParam {
 	case "ytd":
 		startDate = time.Date(now.Year(), 1, 1, 0, 0, 0, 0, loc)
-		// Clamp to earliest available data when YTD starts before we have snapshots.
+		if startDate.Before(earliest) {
+			startDate = earliest
+		}
+	case "1y", "1year", "year":
+		rangeParam = "1y"
+		startDate = endDate.AddDate(-1, 0, 0)
 		if startDate.Before(earliest) {
 			startDate = earliest
 		}
 	case "all":
 		startDate = earliest
 	default:
-		writeJSONError(w, http.StatusBadRequest, "range must be all or ytd")
+		writeJSONError(w, http.StatusBadRequest, "range must be all, 1y, or ytd")
 		return
 	}
 

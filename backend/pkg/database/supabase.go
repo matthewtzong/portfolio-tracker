@@ -1086,6 +1086,30 @@ func (c *Client) GetLatestDailyHoldingsDate(ctx context.Context) (*time.Time, er
 	return &results[0].Date.Time, nil
 }
 
+// Returns the earliest date present in the daily_holdings table.
+func (c *Client) GetEarliestDailyHoldingsDate(ctx context.Context) (*time.Time, error) {
+	url := c.restURL("daily_holdings") + "?select=date&order=date.asc&limit=1"
+
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, nil
+	}
+
+	var results []struct {
+		Date DateOnly `json:"date"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil || len(results) == 0 {
+		return nil, nil
+	}
+
+	return &results[0].Date.Time, nil
+}
+
 // Returns the latest date present in the daily_holdings table for a specific account.
 func (c *Client) GetLatestDailyHoldingsDateForAccount(ctx context.Context, accountID string) (*time.Time, error) {
 	url := c.restURL("daily_holdings") + fmt.Sprintf("?account_id=eq.%s&select=date&order=date.desc&limit=1", accountID)
@@ -1933,6 +1957,30 @@ func (c *Client) ListInvestmentTransactions(ctx context.Context, startDate, endD
 		return nil, err
 	}
 	return txns, nil
+}
+
+// Returns the latest investment transaction date, or nil if none exist.
+func (c *Client) GetLatestInvestmentTransactionDate(ctx context.Context) (*time.Time, error) {
+	url := c.restURL("investment_transactions") + "?select=date&order=date.desc&limit=1"
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get latest investment_transactions date failed: %s", string(body))
+	}
+	var results []struct {
+		Date DateOnly `json:"date"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+	return &results[0].Date.Time, nil
 }
 
 // Returns the earliest daily snapshot, or nil if none exist.
