@@ -513,6 +513,9 @@ func createMonthlyExpenseSummary(ctx context.Context, deps apiDependencies, mont
 
 	// Loops through the transactions and aggregates the spend by category.
 	for _, transaction := range transactions {
+		if transaction.ReviewStatus == database.ReviewStatusPending {
+			continue
+		}
 		if transaction.CategoryID == nil {
 			continue
 		}

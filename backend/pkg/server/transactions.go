@@ -35,6 +35,9 @@ func registerTransactionsRoutes(mux *http.ServeMux, deps apiDependencies) {
 	mux.Handle("/api/transactions/sync", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleSyncTransactions(w, r, deps)
 	})))
+	mux.Handle("/api/transactions/review", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleReviewTransaction(w, r, deps)
+	})))
 	mux.Handle("/api/categories", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleListCategories(w, r, deps)
 	})))
@@ -110,11 +113,15 @@ func SyncTransactionsForItem(ctx context.Context, db *database.Client, plaidClie
 	// Maps Plaid primary category names to our category IDs.
 	plaidNameToCategoryID := make(map[string]int64)
 	var uncategorizedID int64
+	var venmoCategoryID int64
 	for _, category := range categories {
 		if category.PlaidName != nil {
 			plaidNameToCategoryID[*category.PlaidName] = category.ID
 		} else if category.Name == "Uncategorized" {
 			uncategorizedID = category.ID
+		}
+		if category.Name == "Venmo" {
+			venmoCategoryID = category.ID
 		}
 	}
 
@@ -126,14 +133,28 @@ func SyncTransactionsForItem(ctx context.Context, db *database.Client, plaidClie
 			return err
 		}
 
+		modifiedPlaidIDs := make([]string, len(result.Modified))
+		for i, modified := range result.Modified {
+			modifiedPlaidIDs[i] = modified.TransactionID
+		}
+		existingByPlaidID, err := db.GetTransactionsByPlaidIDs(ctx, modifiedPlaidIDs)
+		if err != nil {
+			return err
+		}
+
 		// Converts Plaid transactions to our DB model.
 		var toUpsert []database.Transaction
-		for _, item := range result.Added {
-			transaction := plaidTransactionToDB(item, plaidNameToCategoryID, uncategorizedID, rules)
+		for _, plaidTx := range result.Added {
+			transaction := plaidTransactionToDB(plaidTx, plaidNameToCategoryID, uncategorizedID, venmoCategoryID, rules)
 			toUpsert = append(toUpsert, transaction)
 		}
-		for _, item := range result.Modified {
-			transaction := plaidTransactionToDB(item, plaidNameToCategoryID, uncategorizedID, rules)
+		for _, plaidTx := range result.Modified {
+			transaction := plaidTransactionToDB(plaidTx, plaidNameToCategoryID, uncategorizedID, venmoCategoryID, rules)
+			if existing, ok := existingByPlaidID[plaidTx.TransactionID]; ok && existing.ReviewStatus == database.ReviewStatusCategorized {
+				transaction.CategoryID = existing.CategoryID
+				transaction.ReviewStatus = existing.ReviewStatus
+				transaction.UserNote = existing.UserNote
+			}
 			toUpsert = append(toUpsert, transaction)
 		}
 
@@ -195,7 +216,7 @@ func pfcPrimaryToPlaidName(primary string) string {
 }
 
 // Converts a Plaid transaction to our DB model.
-func plaidTransactionToDB(p plaid.PlaidTransaction, plaidNameToCategoryID map[string]int64, uncategorizedID int64, rules []database.CategoryRule) database.Transaction {
+func plaidTransactionToDB(p plaid.PlaidTransaction, plaidNameToCategoryID map[string]int64, uncategorizedID int64, venmoCategoryID int64, rules []database.CategoryRule) database.Transaction {
 	// Sets up transaction fields.
 	// We negate the amount because Plaid returns positive for outflow and negative for inflow.
 	// Our system convention is: Inflow = Positive, Outflow = Negative.
@@ -241,6 +262,10 @@ func plaidTransactionToDB(p plaid.PlaidTransaction, plaidNameToCategoryID map[st
 
 	// Returns the transaction.
 	now := GetLocalNow()
+	reviewStatus := database.ReviewStatusNone
+	if venmoCategoryID != 0 && categoryID != nil && *categoryID == venmoCategoryID {
+		reviewStatus = database.ReviewStatusPending
+	}
 	return database.Transaction{
 		PlaidAccountID:     p.AccountID,
 		PlaidTransactionID: p.TransactionID,
@@ -249,10 +274,16 @@ func plaidTransactionToDB(p plaid.PlaidTransaction, plaidNameToCategoryID map[st
 		Name:               p.Name,
 		MerchantName:       p.MerchantName,
 		CategoryID:         categoryID,
+		ReviewStatus:       reviewStatus,
 		Pending:            p.Pending,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
+}
+
+// Returns true when a transaction is awaiting manual categorization.
+func isPendingReview(transaction database.Transaction) bool {
+	return transaction.ReviewStatus == database.ReviewStatusPending
 }
 
 // Returns the summary of transactions for the given month.
@@ -301,8 +332,12 @@ func handleGetTransactionsSummary(w http.ResponseWriter, r *http.Request, deps a
 	}
 
 	// Tracks expenses (spend/refund), investments, and income.
-	var incomeCents, expensesCents, investedCents int64
+	var incomeCents, expensesCents, investedCents, pendingReviewCount int64
 	for _, transaction := range list {
+		if isPendingReview(transaction) {
+			pendingReviewCount++
+			continue
+		}
 		amountCents := transaction.AmountCents
 		// Transfer category: positive = income, negative = expense
 		if transaction.CategoryID != nil && *transaction.CategoryID == transferCategoryID {
@@ -332,9 +367,10 @@ func handleGetTransactionsSummary(w http.ResponseWriter, r *http.Request, deps a
 
 	// Encodes the response.
 	err = json.NewEncoder(w).Encode(transactionsSummaryResponse{
-		IncomeCents:   incomeCents,
-		ExpensesCents: expensesCents,
-		InvestedCents: investedCents,
+		IncomeCents:          incomeCents,
+		ExpensesCents:        expensesCents,
+		InvestedCents:        investedCents,
+		PendingReviewCount:   pendingReviewCount,
 	})
 	if err != nil {
 		log.Printf("get transactions summary encode: %v", err)
@@ -430,6 +466,10 @@ func handleListTransactions(w http.ResponseWriter, r *http.Request, deps apiDepe
 			filter.CategoryID = &id
 		}
 	}
+	review := query.Get("review")
+	if review != "" {
+		filter.ReviewStatus = &review
+	}
 
 	// Gets the transactions.
 	list, err := deps.db.ListTransactions(r.Context(), filter)
@@ -461,6 +501,8 @@ func handleListTransactions(w http.ResponseWriter, r *http.Request, deps apiDepe
 			Name:         transaction.Name,
 			MerchantName: transaction.MerchantName,
 			CategoryID:   transaction.CategoryID,
+			ReviewStatus: transaction.ReviewStatus,
+			UserNote:     transaction.UserNote,
 			AccountType:  accountTypeByID[transaction.PlaidAccountID],
 			Pending:      transaction.Pending,
 		}
@@ -473,6 +515,106 @@ func handleListTransactions(w http.ResponseWriter, r *http.Request, deps apiDepe
 	err = json.NewEncoder(w).Encode(transactionsResponse{Transactions: output})
 	if err != nil {
 		log.Printf("list transactions encode: %v", err)
+	}
+}
+
+// Assigns a category and optional note to a transaction awaiting review.
+func handleReviewTransaction(w http.ResponseWriter, r *http.Request, deps apiDependencies) {
+	if r.Method != http.MethodPatch {
+		methodNotAllowed(w, http.MethodPatch)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if deps.db == nil {
+		writeJSONError(w, http.StatusInternalServerError, "database not configured")
+		return
+	}
+
+	var req reviewTransactionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.TransactionID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "transactionId required")
+		return
+	}
+	if req.CategoryID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "categoryId required")
+		return
+	}
+
+	transaction, err := deps.db.GetTransactionByID(r.Context(), req.TransactionID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if transaction == nil {
+		writeJSONError(w, http.StatusNotFound, "transaction not found")
+		return
+	}
+
+	categories, err := deps.db.ListCategories(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var categoryFound bool
+	for _, category := range categories {
+		if category.ID == req.CategoryID {
+			categoryFound = true
+			break
+		}
+	}
+	if !categoryFound {
+		writeJSONError(w, http.StatusBadRequest, "invalid categoryId")
+		return
+	}
+
+	var userNote *string
+	if req.UserNote != nil {
+		trimmed := strings.TrimSpace(*req.UserNote)
+		if trimmed != "" {
+			userNote = &trimmed
+		}
+		// Empty string clears the note (userNote stays nil).
+	} else {
+		userNote = transaction.UserNote
+	}
+
+	reviewStatus := transaction.ReviewStatus
+	if reviewStatus == "" {
+		reviewStatus = database.ReviewStatusNone
+	}
+	if reviewStatus == database.ReviewStatusPending {
+		reviewStatus = database.ReviewStatusCategorized
+	}
+
+	err = deps.db.UpdateTransactionReview(r.Context(), req.TransactionID, req.CategoryID, reviewStatus, userNote)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	categoryNameByID := make(map[int64]string, len(categories))
+	for _, category := range categories {
+		categoryNameByID[category.ID] = category.Name
+	}
+
+	resp := transactionJSON{
+		ID:           transaction.ID,
+		Date:         transaction.Date.Format("2006-01-02"),
+		AmountCents:  transaction.AmountCents,
+		Name:         transaction.Name,
+		MerchantName: transaction.MerchantName,
+		CategoryID:   &req.CategoryID,
+		CategoryName: categoryNameByID[req.CategoryID],
+		ReviewStatus: reviewStatus,
+		UserNote:     userNote,
+		Pending:      transaction.Pending,
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("review transaction encode: %v", err)
 	}
 }
 
@@ -662,6 +804,9 @@ func calculateMonthlySpentByCategory(ctx context.Context, dbClient *database.Cli
 	}
 	// Loops through the transactions and calculates the monthly spent by category.
 	for _, transaction := range transactions {
+		if isPendingReview(transaction) {
+			continue
+		}
 		if transaction.CategoryID == nil {
 			continue
 		}
@@ -705,15 +850,25 @@ type transactionJSON struct {
 	MerchantName *string `json:"merchantName,omitempty"`
 	CategoryID   *int64  `json:"categoryId,omitempty"`
 	CategoryName string  `json:"categoryName,omitempty"`
+	ReviewStatus string  `json:"reviewStatus,omitempty"`
+	UserNote     *string `json:"userNote,omitempty"`
 	AccountType  string  `json:"accountType,omitempty"`
 	Pending      bool    `json:"pending"`
 }
 
 // Monthly summary response: income (inflows), expenses (outflows to expense categories), invested (outflows to Investments).
 type transactionsSummaryResponse struct {
-	IncomeCents   int64 `json:"incomeCents"`
-	ExpensesCents int64 `json:"expensesCents"`
-	InvestedCents int64 `json:"investedCents"`
+	IncomeCents        int64 `json:"incomeCents"`
+	ExpensesCents      int64 `json:"expensesCents"`
+	InvestedCents      int64 `json:"investedCents"`
+	PendingReviewCount int64 `json:"pendingReviewCount"`
+}
+
+// Request body for categorizing a transaction under review.
+type reviewTransactionRequest struct {
+	TransactionID int64   `json:"transactionId"`
+	CategoryID    int64   `json:"categoryId"`
+	UserNote      *string `json:"userNote,omitempty"`
 }
 
 // Yearly expense summary by category.

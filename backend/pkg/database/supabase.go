@@ -750,6 +750,9 @@ func (c *Client) ListTransactions(ctx context.Context, f ListTransactionsFilter)
 		pattern := "%" + f.Search + "%"
 		reqURL += "&or=(name.ilike." + url.QueryEscape(pattern) + ",merchant_name.ilike." + url.QueryEscape(pattern) + ")"
 	}
+	if f.ReviewStatus != nil && *f.ReviewStatus != "" {
+		reqURL += "&review_status=eq." + url.QueryEscape(*f.ReviewStatus)
+	}
 
 	// Gets the transactions
 	resp, err := c.doRequest(ctx, http.MethodGet, reqURL, nil)
@@ -768,6 +771,86 @@ func (c *Client) ListTransactions(ctx context.Context, f ListTransactionsFilter)
 		return nil, err
 	}
 	return list, nil
+}
+
+// Returns a transaction by internal ID.
+func (c *Client) GetTransactionByID(ctx context.Context, id int64) (*Transaction, error) {
+	reqURL := c.restURL("transactions") + fmt.Sprintf("?id=eq.%d", id)
+	resp, err := c.doRequest(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get transaction failed: %s", string(body))
+	}
+	var list []Transaction
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+	if len(list) == 0 {
+		return nil, nil
+	}
+	return &list[0], nil
+}
+
+// Returns transactions keyed by Plaid transaction ID.
+func (c *Client) GetTransactionsByPlaidIDs(ctx context.Context, plaidIDs []string) (map[string]Transaction, error) {
+	result := make(map[string]Transaction, len(plaidIDs))
+	if len(plaidIDs) == 0 {
+		return result, nil
+	}
+	var b strings.Builder
+	b.WriteString("in.(")
+	for i, id := range plaidIDs {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		escaped := strings.ReplaceAll(id, "\\", "\\\\")
+		escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+		b.WriteString("\"" + escaped + "\"")
+	}
+	b.WriteString(")")
+	reqURL := c.restURL("transactions") + "?plaid_transaction_id=" + url.QueryEscape(b.String())
+	resp, err := c.doRequest(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get transactions by plaid ids failed: %s", string(body))
+	}
+	var list []Transaction
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+	for _, transaction := range list {
+		result[transaction.PlaidTransactionID] = transaction
+	}
+	return result, nil
+}
+
+// Updates category, review status, and optional note for a transaction.
+func (c *Client) UpdateTransactionReview(ctx context.Context, id int64, categoryID int64, reviewStatus string, userNote *string) error {
+	payload := map[string]interface{}{
+		"category_id":    categoryID,
+		"review_status":  reviewStatus,
+		"user_note":      userNote,
+		"updated_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	reqURL := c.restURL("transactions") + fmt.Sprintf("?id=eq.%d", id)
+	resp, err := c.doRequest(ctx, http.MethodPatch, reqURL, payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase update transaction review failed: %s", string(body))
+	}
+	return nil
 }
 
 // Returns the last day of the month.
@@ -1481,6 +1564,13 @@ type CategoryRule struct {
 	PlaidAccountID *string `json:"plaid_account_id,omitempty"`
 }
 
+// Review status for transactions that need manual categorization (e.g. Venmo).
+const (
+	ReviewStatusNone         = "none"
+	ReviewStatusPending      = "pending"
+	ReviewStatusCategorized  = "categorized"
+)
+
 // Represents a row in the transactions table.
 type Transaction struct {
 	ID                 int64     `json:"id,omitempty"`
@@ -1491,6 +1581,8 @@ type Transaction struct {
 	Name               string    `json:"name"`
 	MerchantName       *string   `json:"merchant_name"`
 	CategoryID         *int64    `json:"category_id"`
+	ReviewStatus       string    `json:"review_status"`
+	UserNote           *string   `json:"user_note,omitempty"`
 	Pending            bool      `json:"pending"`
 	CreatedAt          time.Time `json:"created_at,omitempty"`
 	UpdatedAt          time.Time `json:"updated_at,omitempty"`
@@ -1498,9 +1590,10 @@ type Transaction struct {
 
 // Holds optional filters for listing transactions.
 type ListTransactionsFilter struct {
-	Month      string
-	CategoryID *int64
-	Search     string
+	Month        string
+	CategoryID   *int64
+	Search       string
+	ReviewStatus *string
 }
 
 // Represents a row in the budgets table.

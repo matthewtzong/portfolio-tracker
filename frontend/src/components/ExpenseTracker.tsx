@@ -18,6 +18,8 @@ interface Transaction {
   merchantName?: string
   categoryId?: number
   categoryName?: string
+  reviewStatus?: string
+  userNote?: string
   accountType?: string
   pending: boolean
 }
@@ -32,6 +34,7 @@ interface TransactionsSummaryResponse {
   incomeCents: number
   expensesCents: number
   investedCents: number
+  pendingReviewCount: number
 }
 
 // Categories response type.
@@ -55,6 +58,13 @@ interface YearlyExpenseSummaryResponse {
 const START_MONTH = '2026-03'
 const START_YEAR = 2026
 
+function categoryDisplayLabel(tx: Transaction): string {
+  if (tx.reviewStatus === 'pending') {
+    return 'Needs review'
+  }
+  return tx.categoryName ?? 'Uncategorized'
+}
+
 // Returns the current month in YYYY-MM.
 function currentMonth(): string {
   const day = new Date()
@@ -71,11 +81,19 @@ export function ExpenseTracker() {
     return m < START_MONTH ? START_MONTH : m
   })
   const [categoryId, setCategoryId] = useState<string>('')
+  const [reviewFilter, setReviewFilter] = useState<'all' | 'pending'>('all')
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(false)
   const [summary, setSummary] = useState<TransactionsSummaryResponse | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const [reviewingTx, setReviewingTx] = useState<Transaction | null>(null)
+  const [modalMode, setModalMode] = useState<'edit' | 'notes'>('edit')
+  const [reviewCategoryId, setReviewCategoryId] = useState<string>('')
+  const [reviewNote, setReviewNote] = useState('')
+  const [reviewSaving, setReviewSaving] = useState(false)
+  const [reviewError, setReviewError] = useState<string | null>(null)
 
   const [yearlySummaryYear, setYearlySummaryYear] = useState<string>('')
   const [yearlySummary, setYearlySummary] = useState<YearlyExpenseSummaryResponse | null>(null)
@@ -113,6 +131,9 @@ export function ExpenseTracker() {
       if (search.trim()) {
         params.set('search', search.trim())
       }
+      if (reviewFilter === 'pending') {
+        params.set('review', 'pending')
+      }
       const query = params.toString()
       const res = await apiRequest<TransactionsResponse>(
         `/api/transactions${query ? `?${query}` : ''}`,
@@ -126,7 +147,7 @@ export function ExpenseTracker() {
     } finally {
       setLoading(false)
     }
-  }, [month, categoryId, search])
+  }, [month, categoryId, search, reviewFilter])
 
   // Loads the transactions on mount and when filters change.
   useEffect(() => {
@@ -215,6 +236,9 @@ export function ExpenseTracker() {
     }
     const totalsByCategory: Record<string, number> = {}
     transactions.forEach((transaction) => {
+      if (transaction.reviewStatus === 'pending') {
+        return
+      }
       const categoryName = transaction.categoryName || 'Uncategorized'
       // Exclude transfers and investments from the expense breakdown pie chart.
       if (categoryName === 'Transfer' || categoryName === 'Investments') {
@@ -232,6 +256,82 @@ export function ExpenseTracker() {
       value: valueCents / 100,
     }))
   }, [transactions])
+
+  const assignableCategories = useMemo(
+    () => categories.filter((c) => c.name !== 'Venmo'),
+    [categories],
+  )
+
+  const openEdit = (tx: Transaction) => {
+    setModalMode('edit')
+    setReviewingTx(tx)
+    setReviewCategoryId(tx.categoryId != null ? String(tx.categoryId) : '')
+    setReviewNote(tx.userNote ?? '')
+    setReviewError(null)
+  }
+
+  const openNotes = (tx: Transaction) => {
+    setModalMode('notes')
+    setReviewingTx(tx)
+    setReviewCategoryId(tx.categoryId != null ? String(tx.categoryId) : '')
+    setReviewNote(tx.userNote ?? '')
+    setReviewError(null)
+  }
+
+  const closeReview = () => {
+    setReviewingTx(null)
+    setReviewCategoryId('')
+    setReviewNote('')
+    setReviewError(null)
+  }
+
+  const handleSaveReview = async () => {
+    if (!reviewingTx) {
+      return
+    }
+    if (modalMode === 'edit' && !reviewCategoryId) {
+      setReviewError('Select a category.')
+      return
+    }
+    if (modalMode === 'notes' && reviewingTx.categoryId == null && !reviewCategoryId) {
+      setReviewError('Categorize this transaction before adding a note.')
+      return
+    }
+    const categoryId =
+      modalMode === 'notes'
+        ? (reviewingTx.categoryId ?? Number(reviewCategoryId))
+        : Number(reviewCategoryId)
+    if (!categoryId) {
+      setReviewError('Select a category.')
+      return
+    }
+    setReviewSaving(true)
+    setReviewError(null)
+    try {
+      const body: {
+        transactionId: number
+        categoryId: number
+        userNote?: string
+      } = {
+        transactionId: reviewingTx.id,
+        categoryId,
+      }
+      if (modalMode === 'notes') {
+        body.userNote = reviewNote.trim()
+      }
+      await apiRequest<Transaction>('/api/transactions/review', {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      })
+      closeReview()
+      await loadTransactions()
+      await loadSummary()
+    } catch (err: unknown) {
+      setReviewError(err instanceof Error ? err.message : 'Failed to save')
+    } finally {
+      setReviewSaving(false)
+    }
+  }
 
   // Exports transactions for the current month as CSV.
   const handleExportTransactions = async () => {
@@ -307,7 +407,9 @@ export function ExpenseTracker() {
               className="w-full bg-zinc-900 border border-border text-zinc-100 rounded-2xl px-5 py-3 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary transition-all cursor-pointer"
             >
               <option value="">All Categories</option>
-              {categories.map((c) => (
+              {categories
+                .filter((c) => c.name !== 'Venmo')
+                .map((c) => (
                 <option key={c.id} value={String(c.id)}>
                   {c.name}
                 </option>
@@ -328,7 +430,40 @@ export function ExpenseTracker() {
               />
             </div>
           </div>
+          <div className="flex items-end">
+            {(reviewFilter === 'pending' || (summary?.pendingReviewCount ?? 0) > 0) && (
+              <button
+                type="button"
+                onClick={() =>
+                  setReviewFilter((f) => (f === 'pending' ? 'all' : 'pending'))
+                }
+                className={`px-5 py-3 rounded-2xl text-sm font-bold border transition-all ${
+                  reviewFilter === 'pending'
+                    ? 'bg-zinc-800 border-border text-zinc-200 hover:border-primary/40'
+                    : 'bg-orange-500/20 border-orange-500/50 text-orange-300 hover:bg-orange-500/30'
+                }`}
+              >
+                {reviewFilter === 'pending' ? 'Done' : 'Needs review'}
+              </button>
+            )}
+          </div>
         </div>
+
+        {summary && summary.pendingReviewCount > 0 && reviewFilter !== 'pending' && (
+          <div className="mb-6 p-4 bg-orange-500/10 border border-orange-500/20 rounded-2xl text-orange-300 text-sm font-medium flex flex-wrap items-center justify-between gap-3">
+            <span>
+              {summary.pendingReviewCount} Venmo transaction
+              {summary.pendingReviewCount === 1 ? '' : 's'} need review this month.
+            </span>
+            <button
+              type="button"
+              onClick={() => setReviewFilter('pending')}
+              className="text-xs font-bold uppercase tracking-wider text-orange-200 hover:text-white transition-colors"
+            >
+              Review now
+            </button>
+          </div>
+        )}
 
         {error && (
           <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-sm font-medium">
@@ -417,20 +552,23 @@ export function ExpenseTracker() {
                 <th className="px-6 py-4 text-right font-bold text-white uppercase tracking-wider text-xs">
                   Amount
                 </th>
+                <th className="px-6 py-4 text-right font-bold text-white uppercase tracking-wider text-xs">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {loading && transactions.length === 0 ? (
                 Array.from({ length: 5 }).map((_, i) => (
                   <tr key={i}>
-                    <td colSpan={4} className="px-6 py-4">
+                    <td colSpan={5} className="px-6 py-4">
                       <div className="h-4 bg-zinc-800 animate-pulse rounded w-full" />
                     </td>
                   </tr>
                 ))
               ) : transactions.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="px-6 py-12 text-center">
+                  <td colSpan={5} className="px-6 py-12 text-center">
                     <p className="text-zinc-500 font-medium italic">
                       No transactions found for this period.
                     </p>
@@ -454,14 +592,22 @@ export function ExpenseTracker() {
                       )}
                     </td>
                     <td className="px-6 py-4">
-                      <span className="bg-zinc-800 text-zinc-300 px-3 py-1 rounded-full text-[10px] font-bold border border-border">
-                        {tx.categoryName ?? 'UNCATEGORIZED'}
-                      </span>
-                      {tx.pending && (
-                        <span className="ml-2 text-[10px] font-bold text-orange-400 uppercase">
-                          Pending
+                      <div className="flex flex-col items-start gap-1 min-w-[7rem]">
+                        <span
+                          className={`inline-block max-w-[11rem] rounded-lg px-2.5 py-1 text-xs font-semibold leading-snug border ${
+                            tx.reviewStatus === 'pending'
+                              ? 'bg-orange-500/10 text-orange-300 border-orange-500/30'
+                              : 'bg-zinc-800 text-zinc-300 border-border'
+                          }`}
+                        >
+                          {categoryDisplayLabel(tx)}
                         </span>
-                      )}
+                        {tx.pending && (
+                          <span className="text-[10px] font-medium text-orange-400/90">
+                            Bank pending
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-6 py-4 text-right font-bold text-xs">
                       {(() => {
@@ -473,6 +619,38 @@ export function ExpenseTracker() {
                           </span>
                         )
                       })()}
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <div className="flex items-center justify-end gap-3">
+                        <button
+                          type="button"
+                          onClick={() => openNotes(tx)}
+                          className={`text-xs font-bold uppercase tracking-wider transition-colors ${
+                            tx.userNote
+                              ? 'text-orange-300 hover:text-orange-200'
+                              : 'text-zinc-500 hover:text-zinc-300'
+                          }`}
+                        >
+                          Notes
+                        </button>
+                        {tx.reviewStatus === 'pending' ? (
+                          <button
+                            type="button"
+                            onClick={() => openEdit(tx)}
+                            className="text-xs font-bold uppercase tracking-wider text-primary hover:text-green-400 transition-colors"
+                          >
+                            Categorize
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => openEdit(tx)}
+                            className="text-xs font-bold uppercase tracking-wider text-zinc-500 hover:text-zinc-300 transition-colors"
+                          >
+                            Edit
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -570,6 +748,73 @@ export function ExpenseTracker() {
           </div>
         ) : null}
       </div>
+
+      {reviewingTx && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70">
+          <div className="w-full max-w-md bg-card border border-border rounded-4xl p-8 shadow-2xl">
+            <h3 className="text-xl font-bold text-white mb-1">
+              {modalMode === 'notes' ? 'Notes' : reviewingTx.reviewStatus === 'pending' ? 'Categorize transaction' : 'Edit category'}
+            </h3>
+            <p className="text-sm text-zinc-500 mb-6 truncate">{reviewingTx.name}</p>
+
+            {modalMode === 'edit' ? (
+              <div>
+                <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">
+                  Category
+                </label>
+                <select
+                  value={reviewCategoryId}
+                  onChange={(e) => setReviewCategoryId(e.target.value)}
+                  className="w-full bg-zinc-900 border border-border text-zinc-100 rounded-2xl px-5 py-3 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option value="">Select category</option>
+                  {assignableCategories.map((c) => (
+                    <option key={c.id} value={String(c.id)}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">
+                  Note
+                </label>
+                <textarea
+                  value={reviewNote}
+                  onChange={(e) => setReviewNote(e.target.value)}
+                  rows={6}
+                  placeholder="e.g. March utilities — reimbursed roommate"
+                  className="w-full bg-zinc-900 border border-border text-zinc-100 rounded-2xl px-5 py-3 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary resize-y max-h-48 overflow-y-auto"
+                />
+              </div>
+            )}
+
+            {reviewError && (
+              <p className="mt-4 text-sm text-red-400 font-medium">{reviewError}</p>
+            )}
+
+            <div className="mt-8 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeReview}
+                disabled={reviewSaving}
+                className="px-5 py-2.5 rounded-full text-sm font-bold text-zinc-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveReview()}
+                disabled={reviewSaving}
+                className="bg-primary text-background px-6 py-2.5 rounded-full text-sm font-bold hover:bg-green-400 transition-all disabled:opacity-50"
+              >
+                {reviewSaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

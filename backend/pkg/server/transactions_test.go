@@ -35,10 +35,13 @@ func TestPlaidTransactionToDB_CategoryRuleTakesPrecedence(t *testing.T) {
 		Pending:       false,
 	}
 
-	result := plaidTransactionToDB(tx, plaidNameToCategoryID, categoryUncategorized, rules)
+	result := plaidTransactionToDB(tx, plaidNameToCategoryID, categoryUncategorized, categoryVenmo, rules)
 
 	if result.CategoryID == nil || *result.CategoryID != categoryVenmo {
 		t.Fatalf("expected category %d from rule, got %#v", categoryVenmo, result.CategoryID)
+	}
+	if result.ReviewStatus != database.ReviewStatusPending {
+		t.Fatalf("expected review_status pending for Venmo, got %q", result.ReviewStatus)
 	}
 	if result.AmountCents != int64(-2550) {
 		t.Fatalf("expected amountCents -2550, got %d", result.AmountCents)
@@ -75,7 +78,7 @@ func TestPlaidTransactionToDB_AccountScopedRule(t *testing.T) {
 		Category:      []string{"Transfer"},
 		Pending:       false,
 	}
-	resultChecking := plaidTransactionToDB(checkingTx, plaidNameToCategoryID, categoryUncategorized, rules)
+	resultChecking := plaidTransactionToDB(checkingTx, plaidNameToCategoryID, categoryUncategorized, 0, rules)
 	if resultChecking.CategoryID == nil || *resultChecking.CategoryID != categoryCCPayment {
 		t.Fatalf("expected CC payment category %d on checking, got %#v", categoryCCPayment, resultChecking.CategoryID)
 	}
@@ -90,7 +93,7 @@ func TestPlaidTransactionToDB_AccountScopedRule(t *testing.T) {
 		Category:      []string{"Food and Drink"},
 		Pending:       false,
 	}
-	resultCredit := plaidTransactionToDB(creditTx, plaidNameToCategoryID, categoryUncategorized, rules)
+	resultCredit := plaidTransactionToDB(creditTx, plaidNameToCategoryID, categoryUncategorized, 0, rules)
 	if resultCredit.CategoryID == nil || *resultCredit.CategoryID != categoryFood {
 		t.Fatalf("expected food category %d on credit, got %#v", categoryFood, resultCredit.CategoryID)
 	}
@@ -128,12 +131,12 @@ func TestPlaidTransactionToDB_FallsBackToPlaidPrimaryOrUncategorized(t *testing.
 		Pending:       false,
 	}
 
-	resultKnown := plaidTransactionToDB(txWithKnownPlaidCategory, plaidNameToCategoryID, categoryUncategorized, rules)
+	resultKnown := plaidTransactionToDB(txWithKnownPlaidCategory, plaidNameToCategoryID, categoryUncategorized, 0, rules)
 	if resultKnown.CategoryID == nil || *resultKnown.CategoryID != categoryInvestments {
 		t.Fatalf("expected category %d, got %#v", categoryInvestments, resultKnown.CategoryID)
 	}
 
-	resultUnknown := plaidTransactionToDB(txWithUnknownPlaidCategory, plaidNameToCategoryID, categoryUncategorized, rules)
+	resultUnknown := plaidTransactionToDB(txWithUnknownPlaidCategory, plaidNameToCategoryID, categoryUncategorized, 0, rules)
 	if resultUnknown.CategoryID == nil || *resultUnknown.CategoryID != categoryUncategorized {
 		t.Fatalf("expected uncategorized %d, got %#v", categoryUncategorized, resultUnknown.CategoryID)
 	}
@@ -158,7 +161,7 @@ func TestPlaidTransactionToDB_UsesPersonalFinanceCategoryWhenLegacyCategoryEmpty
 		PersonalFinanceCategory: &plaid.PersonalFinanceCategory{Primary: "FOOD_AND_DRINK"},
 		Pending:                 false,
 	}
-	result := plaidTransactionToDB(tx, plaidNameToCategoryID, categoryUncategorized, rules)
+	result := plaidTransactionToDB(tx, plaidNameToCategoryID, categoryUncategorized, 0, rules)
 	if result.CategoryID == nil || *result.CategoryID != categoryFood {
 		t.Fatalf("expected category %d from PFC FOOD_AND_DRINK, got %#v", categoryFood, result.CategoryID)
 	}
@@ -168,7 +171,7 @@ func TestPlaidTransactionToDB_UsesPersonalFinanceCategoryWhenLegacyCategoryEmpty
 		AccountID: "acc-1", TransactionID: "tx-2", Amount: 5, Date: "2024-01-02", Name: "Unknown",
 		Category: nil, PersonalFinanceCategory: nil, Pending: false,
 	}
-	resultNoCat := plaidTransactionToDB(txNoCat, plaidNameToCategoryID, categoryUncategorized, rules)
+	resultNoCat := plaidTransactionToDB(txNoCat, plaidNameToCategoryID, categoryUncategorized, 0, rules)
 	if resultNoCat.CategoryID == nil || *resultNoCat.CategoryID != categoryUncategorized {
 		t.Fatalf("expected uncategorized %d when no Plaid category, got %#v", categoryUncategorized, resultNoCat.CategoryID)
 	}
@@ -178,6 +181,12 @@ func TestCalculateMonthlySpentByCategoryFromData(t *testing.T) {
 	categoryGroceries := database.Category{
 		ID:        1,
 		Name:      "Groceries",
+		PlaidName: nil,
+		Expense:   true,
+	}
+	categoryVenmo := database.Category{
+		ID:        3,
+		Name:      "Venmo",
 		PlaidName: nil,
 		Expense:   true,
 	}
@@ -210,13 +219,25 @@ func TestCalculateMonthlySpentByCategoryFromData(t *testing.T) {
 			Name:        "Paycheck",
 			CategoryID:  int64Ptr(categoryIncome.ID),
 		},
+		{
+			ID:           4,
+			Date:         database.DateOnly{Time: time.Now()},
+			AmountCents:  -4000,
+			Name:         "Venmo",
+			CategoryID:   int64Ptr(categoryVenmo.ID),
+			ReviewStatus: database.ReviewStatusPending,
+		},
 	}
 
-	spent := calculateMonthlySpentByCategoryFromData(transactions, []database.Category{categoryGroceries, categoryIncome})
+	spent := calculateMonthlySpentByCategoryFromData(transactions, []database.Category{categoryGroceries, categoryIncome, categoryVenmo})
 
 	got := spent["Groceries"]
 	if got != 2000 {
 		t.Fatalf("expected Groceries spent 2000, got %d", got)
+	}
+
+	if _, ok := spent["Venmo"]; ok {
+		t.Fatalf("expected pending Venmo to be excluded from spent")
 	}
 
 	if _, ok := spent["Income"]; ok {
@@ -291,6 +312,9 @@ func calculateMonthlySpentByCategoryFromData(transactions []database.Transaction
 	}
 
 	for _, transaction := range transactions {
+		if transaction.ReviewStatus == database.ReviewStatusPending {
+			continue
+		}
 		if transaction.CategoryID == nil {
 			continue
 		}
@@ -326,6 +350,9 @@ func summarizeTransactionsForTest(transactions []database.Transaction, categorie
 
 	// Loops through the transactions and summarizes the income, expenses, and invested amounts.
 	for _, transaction := range transactions {
+		if transaction.ReviewStatus == database.ReviewStatusPending {
+			continue
+		}
 		if transaction.CategoryID != nil && *transaction.CategoryID == transferCategoryID {
 			continue
 		}

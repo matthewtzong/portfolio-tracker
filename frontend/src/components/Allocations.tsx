@@ -49,6 +49,13 @@ interface OverviewWarning {
   key?: string
 }
 
+interface OverviewMoversPeriod {
+  fromDate?: string
+  toDate?: string
+  gainers: OverviewMover[]
+  losers: OverviewMover[]
+}
+
 interface PortfolioOverview {
   totalValueCents: number
   dayOverDay?: OverviewDelta
@@ -56,8 +63,8 @@ interface PortfolioOverview {
   bySymbol: OverviewSymbol[]
   byBucket: OverviewBucket[]
   byAssetClass: OverviewBucket[]
-  gainers: OverviewMover[]
-  losers: OverviewMover[]
+  moversDay: OverviewMoversPeriod
+  moversWeek: OverviewMoversPeriod
   warnings: OverviewWarning[]
   targetsSumBps: number
   targetsComplete: boolean
@@ -88,6 +95,31 @@ function formatCurrency(cents: number): string {
 
 function formatBpsAsPercent(bps: number): string {
   return `${(bps / 100).toFixed(1)}%`
+}
+
+function formatSnapshotDate(date: string): string {
+  const parsed = new Date(`${date}T12:00:00`)
+  if (Number.isNaN(parsed.getTime())) return date
+  return parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function formatMoversPeriodLabel(from?: string, to?: string, kind: 'day' | 'week' = 'day'): string {
+  if (!from || !to) {
+    if (kind === 'week') {
+      return 'Need at least 5 days of nightly snapshots for weekly movers. Ranked by % change; new positions excluded.'
+    }
+    return 'Need at least two nightly snapshots. Ranked by % change; new positions excluded.'
+  }
+  const window =
+    kind === 'week'
+      ? 'Last Week'
+      : 'Last Day'
+  return `${window}: ${formatSnapshotDate(from)} → ${formatSnapshotDate(to)}.`
+}
+
+function formatDeltaPeriod(delta?: OverviewDelta): string | null {
+  if (!delta?.fromDate || !delta?.toDate) return null
+  return `${formatSnapshotDate(delta.fromDate)} → ${formatSnapshotDate(delta.toDate)}`
 }
 
 function formatDelta(delta?: OverviewDelta): string {
@@ -243,6 +275,9 @@ export function Allocations() {
               >
                 {formatDelta(overview?.dayOverDay)}
               </p>
+              {formatDeltaPeriod(overview?.dayOverDay) && (
+                <p className="text-[11px] text-zinc-500 mt-1">{formatDeltaPeriod(overview?.dayOverDay)}</p>
+              )}
             </div>
             <div>
               <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">
@@ -257,6 +292,11 @@ export function Allocations() {
               >
                 {formatDelta(overview?.monthOverMonth)}
               </p>
+              {formatDeltaPeriod(overview?.monthOverMonth) && (
+                <p className="text-[11px] text-zinc-500 mt-1">
+                  {formatDeltaPeriod(overview?.monthOverMonth)}
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -494,9 +534,36 @@ export function Allocations() {
       </div>
 
       {/* Movers */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <MoversCard title="Top gainers" movers={overview?.gainers ?? []} positive />
-        <MoversCard title="Top losers" movers={overview?.losers ?? []} positive={false} />
+      <div className="space-y-8">
+        <div className="space-y-3">
+          <h2 className="text-xl font-bold text-white px-1">Top movers — Last Day</h2>
+          <p className="text-zinc-500 text-sm font-medium px-1">
+            {formatMoversPeriodLabel(
+              overview?.moversDay?.fromDate,
+              overview?.moversDay?.toDate,
+              'day',
+            )}
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <MoversCard title="Top gainers" movers={overview?.moversDay?.gainers ?? []} positive />
+            <MoversCard title="Top losers" movers={overview?.moversDay?.losers ?? []} positive={false} />
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <h2 className="text-xl font-bold text-white px-1">Top movers — Last Week</h2>
+          <p className="text-zinc-500 text-sm font-medium px-1">
+            {formatMoversPeriodLabel(
+              overview?.moversWeek?.fromDate,
+              overview?.moversWeek?.toDate,
+              'week',
+            )}
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <MoversCard title="Top gainers" movers={overview?.moversWeek?.gainers ?? []} positive />
+            <MoversCard title="Top losers" movers={overview?.moversWeek?.losers ?? []} positive={false} />
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -525,11 +592,12 @@ function MoversCard({
             >
               <span className="font-bold text-white">{m.symbol}</span>
               <span className={`font-bold text-sm ${positive ? 'text-green-400' : 'text-red-400'}`}>
+                {m.percentBps != null
+                  ? `${m.percentBps >= 0 ? '+' : ''}${(m.percentBps / 100).toFixed(2)}%`
+                  : '—'}
+                {' · '}
                 {m.absoluteCents >= 0 ? '+' : ''}
                 {formatCurrency(m.absoluteCents)}
-                {m.percentBps != null
-                  ? ` (${m.percentBps >= 0 ? '+' : ''}${(m.percentBps / 100).toFixed(2)}%)`
-                  : ''}
               </span>
             </li>
           ))}

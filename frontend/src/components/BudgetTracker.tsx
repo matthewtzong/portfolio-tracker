@@ -24,6 +24,11 @@ interface CategoriesResponse {
 const START_MONTH = '2026-03'
 const START_YEAR = 2026
 
+// Venmo is a review staging category, not a budget line.
+function isBudgetableCategory(category: Category): boolean {
+  return category.expense && category.name !== 'Venmo'
+}
+
 // Returns the current month in YYYY-MM.
 function currentMonth(): string {
   const day = new Date()
@@ -45,6 +50,11 @@ export function BudgetTracker() {
   const [error, setError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [totalBudget, setTotalBudget] = useState<string>('')
+
+  const budgetCategories = useMemo(
+    () => categories.filter(isBudgetableCategory),
+    [categories],
+  )
 
   // Loads the categories from the backend.
   const loadCategories = useCallback(async () => {
@@ -73,13 +83,23 @@ export function BudgetTracker() {
     try {
       const res = await apiRequest<BudgetResponse>(`/api/budget?month=${encodeURIComponent(month)}`)
       const nextAllocations = res.allocations ?? {}
-      setAllocations(nextAllocations)
+      const budgetableIds = new Set(
+        categories.filter(isBudgetableCategory).map((cat) => String(cat.id)),
+      )
+      // Drop Venmo (and any other non-budgetable) keys from loaded allocations.
+      const cleanedAllocations: Record<string, number> = {}
+      for (const [key, value] of Object.entries(nextAllocations)) {
+        if (budgetableIds.has(key) && typeof value === 'number') {
+          cleanedAllocations[key] = value
+        }
+      }
+      setAllocations(cleanedAllocations)
 
       // Map data from name to ID
       const spentByName = res.spent ?? {}
       const spentById: Record<string, number> = {}
       categories.forEach((cat) => {
-        if (cat.expense) {
+        if (isBudgetableCategory(cat)) {
           const val = spentByName[cat.name] ?? 0
           spentById[String(cat.id)] = val
         }
@@ -87,7 +107,7 @@ export function BudgetTracker() {
       setSpent(spentById)
 
       // Computes the current budget allocations.
-      const totalAllocatedCents = Object.values(nextAllocations).reduce(
+      const totalAllocatedCents = Object.values(cleanedAllocations).reduce(
         (sum, value) => sum + (typeof value === 'number' ? value : 0),
         0,
       )
@@ -130,19 +150,17 @@ export function BudgetTracker() {
 
   // Builds data for budget vs spent chart.
   const budgetChartData = useMemo(() => {
-    return categories
-      .filter((c) => c.expense)
-      .map((category) => {
-        const key = String(category.id)
-        const allocatedCents = allocations[key] ?? 0
-        const spentCents = spent[key] ?? 0
-        return {
-          name: category.name,
-          budget: allocatedCents / 100,
-          spent: spentCents < 0 ? Math.abs(spentCents) / 100 : 0,
-        }
-      })
-  }, [allocations, categories, spent])
+    return budgetCategories.map((category) => {
+      const key = String(category.id)
+      const allocatedCents = allocations[key] ?? 0
+      const spentCents = spent[key] ?? 0
+      return {
+        name: category.name,
+        budget: allocatedCents / 100,
+        spent: spentCents < 0 ? Math.abs(spentCents) / 100 : 0,
+      }
+    })
+  }, [allocations, budgetCategories, spent])
 
   // Handles budget change for a category (value is in dollars).
   const handleAllocationChange = (categoryId: number, value: string) => {
@@ -165,15 +183,14 @@ export function BudgetTracker() {
     setError(null)
     setSuccessMessage(null)
 
-    // Normalize allocations so every expense category has an entry (at least 0).
+    // Normalize allocations so every budgetable category has an entry (at least 0).
+    // Venmo is excluded — spend lands in the real category after review.
     const normalizedAllocations: Record<string, number> = {}
-    categories
-      .filter((c) => c.expense)
-      .forEach((category) => {
-        const key = String(category.id)
-        const value = allocations[key]
-        normalizedAllocations[key] = typeof value === 'number' && !Number.isNaN(value) ? value : 0
-      })
+    budgetCategories.forEach((category) => {
+      const key = String(category.id)
+      const value = allocations[key]
+      normalizedAllocations[key] = typeof value === 'number' && !Number.isNaN(value) ? value : 0
+    })
 
     // Validate that allocations sum to the designated total budget.
     const parsedTotal = parseFloat(totalBudget)
@@ -317,7 +334,7 @@ export function BudgetTracker() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {categories.filter((c) => c.expense).length === 0 ? (
+                  {budgetCategories.length === 0 ? (
                     <tr>
                       <td
                         colSpan={4}
@@ -327,9 +344,7 @@ export function BudgetTracker() {
                       </td>
                     </tr>
                   ) : (
-                    categories
-                      .filter((c) => c.expense)
-                      .map((category) => {
+                    budgetCategories.map((category) => {
                         const key = String(category.id)
                         const allocatedCents = allocations[key] ?? 0
                         const spentCents = spent[key] ?? 0

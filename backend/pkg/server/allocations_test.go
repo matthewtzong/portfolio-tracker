@@ -109,58 +109,56 @@ func TestBuildPortfolioOverviewExcludesCashAndAllowsOneOverCap(t *testing.T) {
 		t.Fatalf("unexpected MoM: %+v", resp.MonthOverMonth)
 	}
 
-	// GOOG ~30% over 10% cap; AAPL ~20% over — two over cap => error.
+	// GOOG ~30% and AAPL ~20% over 10% — only AAPL should warn (GOOG is exempt).
 	hasCapError := false
-	hasConcentrationInfo := false
 	for _, w := range resp.Warnings {
 		if w.Type == "single_name_cap" && w.Severity == "error" {
 			hasCapError = true
-		}
-		if w.Type == "concentration" {
-			hasConcentrationInfo = true
-		}
-	}
-	if !hasCapError {
-		t.Fatalf("expected single_name_cap error when 2 stocks over cap; warnings=%+v", resp.Warnings)
-	}
-	for _, w := range resp.Warnings {
-		if w.Type == "single_name_cap" {
-			if !strings.Contains(w.Message, "GOOG") || !strings.Contains(w.Message, "AAPL") {
-				t.Fatalf("expected tickers in cap message, got %q", w.Message)
+			if !strings.Contains(w.Message, "AAPL") {
+				t.Fatalf("expected AAPL in cap message, got %q", w.Message)
+			}
+			if strings.Contains(w.Message, "GOOG") {
+				t.Fatalf("GOOG should be exempt from cap warning, got %q", w.Message)
 			}
 		}
 	}
-	if hasConcentrationInfo {
-		t.Fatal("should not emit muted concentration when 2+ are over cap")
+	if !hasCapError {
+		t.Fatalf("expected single_name_cap error for non-GOOG stock over cap; warnings=%+v", resp.Warnings)
 	}
 
-	// Only GOOG over cap.
+	// Only GOOG over cap — no warning.
 	currentOne := []overviewHoldingInput{
 		{AccountID: "a1", AccountName: "B", Symbol: "VOO", Quantity: 1, ValueCents: 800000},
 		{AccountID: "a1", AccountName: "B", Symbol: "GOOG", Quantity: 1, ValueCents: 150000},
 		{AccountID: "a1", AccountName: "B", Symbol: "AAPL", Quantity: 1, ValueCents: 50000},
 	}
 	resp2 := buildPortfolioOverview(currentOne, prior, prior, classBySymbol, snapshots, monthly, nil, settings)
-	hasCapError = false
-	hasConcentrationInfo = false
 	for _, w := range resp2.Warnings {
-		if w.Type == "single_name_cap" {
-			hasCapError = true
-		}
-		if w.Type == "concentration" && w.Severity == "info" {
-			hasConcentrationInfo = true
+		if w.Type == "single_name_cap" || w.Type == "concentration" {
+			t.Fatalf("GOOG-only over cap should not warn; got %+v", w)
 		}
 	}
-	if hasCapError {
-		t.Fatal("one stock over cap should not be an error")
+
+	// Non-GOOG stock alone over cap — warn.
+	currentAVGO := []overviewHoldingInput{
+		{AccountID: "a1", AccountName: "B", Symbol: "VOO", Quantity: 1, ValueCents: 800000},
+		{AccountID: "a1", AccountName: "B", Symbol: "AVGO", Quantity: 1, ValueCents: 150000},
+		{AccountID: "a1", AccountName: "B", Symbol: "AAPL", Quantity: 1, ValueCents: 50000},
 	}
-	if !hasConcentrationInfo {
-		t.Fatalf("expected muted concentration for single over-cap stock; warnings=%+v", resp2.Warnings)
+	classAVGO := map[string]string{
+		"VOO":  assetClassETF,
+		"AVGO": assetClassStock,
+		"AAPL": assetClassStock,
 	}
-	for _, w := range resp2.Warnings {
-		if w.Type == "concentration" && !strings.Contains(w.Message, "GOOG") {
-			t.Fatalf("expected GOOG in concentration message, got %q", w.Message)
+	resp3 := buildPortfolioOverview(currentAVGO, prior, prior, classAVGO, snapshots, monthly, nil, settings)
+	foundAVGO := false
+	for _, w := range resp3.Warnings {
+		if w.Type == "single_name_cap" && strings.Contains(w.Message, "AVGO") {
+			foundAVGO = true
 		}
+	}
+	if !foundAVGO {
+		t.Fatalf("expected AVGO cap warning; warnings=%+v", resp3.Warnings)
 	}
 }
 
@@ -234,8 +232,41 @@ func TestComputeMoversSkipsCashAndNewPositions(t *testing.T) {
 	}
 	for _, g := range gainers {
 		if g.Symbol == "NEW" || g.Symbol == "SPAXX" {
-			t.Fatal("NEW and SPAXX should not be in % movers")
+			t.Fatal("NEW and SPAXX should not be in movers")
 		}
 	}
 	_ = losers
+}
+
+func TestComputeMoversSortsByPercent(t *testing.T) {
+	classBySymbol := map[string]string{
+		"VOO":  assetClassETF,
+		"SMALL": assetClassStock,
+	}
+	prior := []overviewHoldingInput{
+		{Symbol: "VOO", ValueCents: 500000},
+		{Symbol: "SMALL", ValueCents: 10000},
+	}
+	current := []overviewHoldingInput{
+		{Symbol: "VOO", ValueCents: 510000},  // +2%
+		{Symbol: "SMALL", ValueCents: 15000}, // +50%
+	}
+	gainers, _ := computeMovers(prior, current, classBySymbol)
+	if len(gainers) != 2 {
+		t.Fatalf("expected 2 gainers, got %d", len(gainers))
+	}
+	if gainers[0].Symbol != "SMALL" {
+		t.Fatalf("expected SMALL first by %%, got %+v", gainers)
+	}
+}
+
+func TestFindWeekComparisonDate(t *testing.T) {
+	dates := []string{"2026-08-10", "2026-08-15", "2026-08-17", "2026-08-24"}
+	got, ok := findWeekComparisonDate(dates)
+	if !ok {
+		t.Fatal("expected week comparison date")
+	}
+	if got != "2026-08-17" {
+		t.Fatalf("expected 2026-08-17, got %s", got)
+	}
 }

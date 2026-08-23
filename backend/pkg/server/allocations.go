@@ -28,6 +28,9 @@ const (
 
 	defaultDriftWarnBps      = 500
 	defaultSingleStockMaxBps = 1000
+
+	// GOOG may exceed the single-stock cap without triggering a warning.
+	singleStockCapExemptSymbol = "GOOG"
 )
 
 // Maps Plaid security type (+ sweep ticker heuristics) to our asset_class and source.
@@ -131,6 +134,14 @@ type overviewMoverJSON struct {
 	ToCents       int64  `json:"toCents"`
 }
 
+// Top movers for a time window.
+type overviewMoversPeriodJSON struct {
+	FromDate string              `json:"fromDate,omitempty"`
+	ToDate   string              `json:"toDate,omitempty"`
+	Gainers  []overviewMoverJSON `json:"gainers"`
+	Losers   []overviewMoverJSON `json:"losers"`
+}
+
 // Warning shown on the allocations page.
 type overviewWarningJSON struct {
 	Type     string   `json:"type"`
@@ -142,19 +153,19 @@ type overviewWarningJSON struct {
 
 // Full overview API response.
 type portfolioOverviewResponse struct {
-	TotalValueCents   int64                 `json:"totalValueCents"`
-	DayOverDay        *overviewDeltaJSON    `json:"dayOverDay,omitempty"`
-	MonthOverMonth    *overviewDeltaJSON    `json:"monthOverMonth,omitempty"`
-	BySymbol          []overviewSymbolJSON  `json:"bySymbol"`
-	ByBucket          []overviewBucketJSON  `json:"byBucket"`
-	ByAssetClass      []overviewBucketJSON  `json:"byAssetClass"`
-	Gainers           []overviewMoverJSON   `json:"gainers"`
-	Losers            []overviewMoverJSON   `json:"losers"`
-	Warnings          []overviewWarningJSON `json:"warnings"`
-	TargetsSumBps     int                   `json:"targetsSumBps"`
-	TargetsComplete   bool                  `json:"targetsComplete"`
-	DriftWarnBps      int                   `json:"driftWarnBps"`
-	SingleStockMaxBps int                   `json:"singleStockMaxBps"`
+	TotalValueCents   int64                    `json:"totalValueCents"`
+	DayOverDay        *overviewDeltaJSON       `json:"dayOverDay,omitempty"`
+	MonthOverMonth    *overviewDeltaJSON       `json:"monthOverMonth,omitempty"`
+	BySymbol          []overviewSymbolJSON     `json:"bySymbol"`
+	ByBucket          []overviewBucketJSON     `json:"byBucket"`
+	ByAssetClass      []overviewBucketJSON     `json:"byAssetClass"`
+	MoversDay         overviewMoversPeriodJSON `json:"moversDay"`
+	MoversWeek        overviewMoversPeriodJSON `json:"moversWeek"`
+	Warnings          []overviewWarningJSON    `json:"warnings"`
+	TargetsSumBps     int                      `json:"targetsSumBps"`
+	TargetsComplete   bool                     `json:"targetsComplete"`
+	DriftWarnBps      int                      `json:"driftWarnBps"`
+	SingleStockMaxBps int                      `json:"singleStockMaxBps"`
 }
 
 // Pure overview builder (unit-tested).
@@ -208,8 +219,8 @@ func buildPortfolioOverview(
 		BySymbol:          investedSymbols,
 		ByBucket:          byBucket,
 		ByAssetClass:      byAssetClass,
-		Gainers:           []overviewMoverJSON{},
-		Losers:            []overviewMoverJSON{},
+		MoversDay:         overviewMoversPeriodJSON{Gainers: []overviewMoverJSON{}, Losers: []overviewMoverJSON{}},
+		MoversWeek:        overviewMoversPeriodJSON{Gainers: []overviewMoverJSON{}, Losers: []overviewMoverJSON{}},
 		Warnings:          []overviewWarningJSON{},
 		DriftWarnBps:      settings.DriftWarnBps,
 		SingleStockMaxBps: settings.SingleStockMaxBps,
@@ -218,11 +229,6 @@ func buildPortfolioOverview(
 	resp.DayOverDay = deltaFromSnapshots(dailySnapshots)
 	resp.MonthOverMonth = deltaFromMonthlyPoints(monthlyTotals)
 
-	gainers, losers := computeMovers(priorDay, current, classBySymbol)
-	resp.Gainers = gainers
-	resp.Losers = losers
-
-	// Per-ticker MoM is not returned as a separate list; oldestDay reserved for future use.
 	_ = oldestDay
 
 	targetsSum := 0
@@ -498,12 +504,9 @@ func computeMovers(prior, current []overviewHoldingInput, classBySymbol map[stri
 	to := sumHoldingsBySymbol(current, classBySymbol)
 
 	movers := make([]overviewMoverJSON, 0)
-	seen := make(map[string]bool)
 	for symbol, toCents := range to {
-		seen[symbol] = true
 		fromCents, ok := from[symbol]
 		if !ok || fromCents == 0 {
-			// New position: skip % rank.
 			continue
 		}
 		abs := toCents - fromCents
@@ -516,25 +519,89 @@ func computeMovers(prior, current []overviewHoldingInput, classBySymbol map[stri
 			ToCents:       toCents,
 		})
 	}
-	_ = seen
 
-	sort.Slice(movers, func(i, j int) bool {
-		return movers[i].AbsoluteCents > movers[j].AbsoluteCents
+	gainersAll := make([]overviewMoverJSON, 0)
+	losersAll := make([]overviewMoverJSON, 0)
+	for _, m := range movers {
+		if m.PercentBps == nil {
+			continue
+		}
+		if *m.PercentBps > 0 {
+			gainersAll = append(gainersAll, m)
+		} else if *m.PercentBps < 0 {
+			losersAll = append(losersAll, m)
+		}
+	}
+
+	sort.Slice(gainersAll, func(i, j int) bool {
+		return *gainersAll[i].PercentBps > *gainersAll[j].PercentBps
+	})
+	sort.Slice(losersAll, func(i, j int) bool {
+		return *losersAll[i].PercentBps < *losersAll[j].PercentBps
 	})
 
 	gainers = make([]overviewMoverJSON, 0, 5)
 	losers = make([]overviewMoverJSON, 0, 5)
-	for _, m := range movers {
-		if m.AbsoluteCents > 0 && len(gainers) < 5 {
-			gainers = append(gainers, m)
-		}
+	for i := 0; i < len(gainersAll) && i < 5; i++ {
+		gainers = append(gainers, gainersAll[i])
 	}
-	for i := len(movers) - 1; i >= 0 && len(losers) < 5; i-- {
-		if movers[i].AbsoluteCents < 0 {
-			losers = append(losers, movers[i])
-		}
+	for i := 0; i < len(losersAll) && i < 5; i++ {
+		losers = append(losers, losersAll[i])
 	}
 	return gainers, losers
+}
+
+func buildMoversPeriod(
+	prior, current []overviewHoldingInput,
+	fromDate, toDate string,
+	classBySymbol map[string]string,
+) overviewMoversPeriodJSON {
+	gainers, losers := computeMovers(prior, current, classBySymbol)
+	return overviewMoversPeriodJSON{
+		FromDate: fromDate,
+		ToDate:   toDate,
+		Gainers:  gainers,
+		Losers:   losers,
+	}
+}
+
+const minWeekMoverSpanDays = 5
+
+// findWeekComparisonDate returns the snapshot date closest to one week before latest.
+func findWeekComparisonDate(dates []string) (string, bool) {
+	if len(dates) < 2 {
+		return "", false
+	}
+	latestStr := dates[len(dates)-1]
+	latest, err := time.Parse(dateLayout, latestStr)
+	if err != nil {
+		return "", false
+	}
+	target := latest.AddDate(0, 0, -7)
+
+	bestDate := ""
+	var bestDiff time.Duration = -1
+	for i := 0; i < len(dates)-1; i++ {
+		d, err := time.Parse(dateLayout, dates[i])
+		if err != nil || !d.Before(latest) {
+			continue
+		}
+		if latest.Sub(d) < time.Duration(minWeekMoverSpanDays)*24*time.Hour {
+			continue
+		}
+		diff := target.Sub(d)
+		if diff < 0 {
+			diff = -diff
+		}
+		if bestDiff < 0 || diff < bestDiff {
+			bestDiff = diff
+			bestDate = dates[i]
+		}
+	}
+	if bestDate == "" {
+		return "", false
+	}
+	return bestDate, true
 }
 
 func buildWarnings(
@@ -585,30 +652,35 @@ func buildWarnings(
 		}
 	}
 
-	overCap := make([]string, 0)
+	overCapWarn := make([]string, 0)
 	for _, s := range symbols {
 		if s.AssetClass != assetClassStock {
 			continue
 		}
-		if s.WeightBps > settings.SingleStockMaxBps {
-			overCap = append(overCap, s.Symbol)
+		if s.WeightBps <= settings.SingleStockMaxBps {
+			continue
 		}
+		// GOOG is exempt from the single-stock cap warning.
+		if strings.EqualFold(s.Symbol, singleStockCapExemptSymbol) {
+			continue
+		}
+		overCapWarn = append(overCapWarn, s.Symbol)
 	}
-	sort.Strings(overCap)
+	sort.Strings(overCapWarn)
 	capPercent := float64(settings.SingleStockMaxBps) / 100.0
-	if len(overCap) == 1 {
-		warnings = append(warnings, overviewWarningJSON{
-			Type:     "concentration",
-			Severity: "info",
-			Message:  overCap[0] + " is above the " + formatCapPercent(capPercent) + " single-stock concentration cap (allowed).",
-			Symbols:  overCap,
-		})
-	} else if len(overCap) >= 2 {
+	if len(overCapWarn) == 1 {
 		warnings = append(warnings, overviewWarningJSON{
 			Type:     "single_name_cap",
 			Severity: "error",
-			Message:  joinTickerList(overCap) + " are above the " + formatCapPercent(capPercent) + " single-stock concentration cap.",
-			Symbols:  overCap,
+			Message:  overCapWarn[0] + " is above the " + formatCapPercent(capPercent) + " single-stock concentration cap.",
+			Symbols:  overCapWarn,
+		})
+	} else if len(overCapWarn) >= 2 {
+		warnings = append(warnings, overviewWarningJSON{
+			Type:     "single_name_cap",
+			Severity: "error",
+			Message:  joinTickerList(overCapWarn) + " are above the " + formatCapPercent(capPercent) + " single-stock concentration cap.",
+			Symbols:  overCapWarn,
 		})
 	}
 
@@ -814,6 +886,16 @@ func handleGetPortfolioOverview(w http.ResponseWriter, r *http.Request, deps api
 	}
 
 	resp := buildPortfolioOverview(current, prior, oldest, classBySymbol, dailySnapshots, monthlyPoints, targets, settings)
+	if len(dates) >= 2 {
+		latest := dates[len(dates)-1]
+		priorDate := dates[len(dates)-2]
+		resp.MoversDay = buildMoversPeriod(prior, current, priorDate, latest, classBySymbol)
+	}
+	if weekDate, ok := findWeekComparisonDate(dates); ok && len(dates) >= 1 {
+		latest := dates[len(dates)-1]
+		weekPrior := filterHoldingsForDate(holdingsHistory, weekDate, accountNameMap)
+		resp.MoversWeek = buildMoversPeriod(weekPrior, current, weekDate, latest, classBySymbol)
+	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
