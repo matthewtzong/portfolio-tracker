@@ -100,12 +100,12 @@ type overviewAccountJSON struct {
 
 // Aggregated symbol allocation row.
 type overviewSymbolJSON struct {
-	Symbol     string                 `json:"symbol"`
-	AssetClass string                 `json:"assetClass"`
-	Quantity   float64                `json:"quantity"`
-	ValueCents int64                  `json:"valueCents"`
-	WeightBps  int                    `json:"weightBps"`
-	Accounts   []overviewAccountJSON  `json:"accounts"`
+	Symbol     string                `json:"symbol"`
+	AssetClass string                `json:"assetClass"`
+	Quantity   float64               `json:"quantity"`
+	ValueCents int64                 `json:"valueCents"`
+	WeightBps  int                   `json:"weightBps"`
+	Accounts   []overviewAccountJSON `json:"accounts"`
 }
 
 // Asset-class / target-bucket row.
@@ -119,10 +119,10 @@ type overviewBucketJSON struct {
 
 // Dollar and percent change.
 type overviewDeltaJSON struct {
-	AbsoluteCents int64    `json:"absoluteCents"`
-	PercentBps    *int     `json:"percentBps,omitempty"`
-	FromDate      string   `json:"fromDate,omitempty"`
-	ToDate        string   `json:"toDate,omitempty"`
+	AbsoluteCents int64  `json:"absoluteCents"`
+	PercentBps    *int   `json:"percentBps,omitempty"`
+	FromDate      string `json:"fromDate,omitempty"`
+	ToDate        string `json:"toDate,omitempty"`
 }
 
 // Top mover row.
@@ -840,17 +840,20 @@ func handleGetPortfolioOverview(w http.ResponseWriter, r *http.Request, deps api
 				latestDaily = s
 			}
 		}
-		currentMonth := time.Date(latestDaily.Date.Year(), latestDaily.Date.Month(), 1, 0, 0, 0, 0, GetLocalLocation()).Format(dateLayout)
+		// Use the latest daily's real date (not the 1st of the month) so MoM shows
+		// e.g. Jul 31 → Aug 22 instead of Jul 31 → Aug 1.
+		latestDailyDate := latestDaily.Date.Format(dateLayout)
+		currentMonthPrefix := latestDailyDate[:7]
 		hasCurrent := false
 		for _, p := range monthlyPoints {
-			if strings.HasPrefix(p.Date, currentMonth[:7]) || p.Date == currentMonth {
+			if len(p.Date) >= 7 && p.Date[:7] == currentMonthPrefix {
 				hasCurrent = true
 				break
 			}
 		}
 		if !hasCurrent {
 			monthlyPoints = append(monthlyPoints, SnapshotDataPoint{
-				Date:                currentMonth,
+				Date:                latestDailyDate,
 				PortfolioValueCents: latestDaily.PortfolioValueCents,
 			})
 			sortSnapshotDataPoints(monthlyPoints)
