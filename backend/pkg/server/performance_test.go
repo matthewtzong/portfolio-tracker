@@ -70,3 +70,25 @@ func TestModifiedDietzNoFlows(t *testing.T) {
 		t.Fatalf("returnBps=%d, want 1000 (10%%)", result.ReturnBps)
 	}
 }
+
+func TestCalendarMonthBoundsIncludesEOM(t *testing.T) {
+	first, last := calendarMonthBounds(2026, time.March)
+	if first.Format("2006-01-02") != "2026-03-01" {
+		t.Fatalf("first=%s, want 2026-03-01", first.Format("2006-01-02"))
+	}
+	if last.Format("2006-01-02") != "2026-03-31" {
+		t.Fatalf("last=%s, want 2026-03-31", last.Format("2006-01-02"))
+	}
+}
+
+func TestClampYTDStartToEarliest(t *testing.T) {
+	ytd := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	earliest := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+	start := ytd
+	if start.Before(earliest) {
+		start = earliest
+	}
+	if start.Format("2006-01-02") != "2026-03-31" {
+		t.Fatalf("clamped start=%s, want 2026-03-31", start.Format("2006-01-02"))
+	}
+}

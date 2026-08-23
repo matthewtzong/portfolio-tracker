@@ -192,6 +192,8 @@ func syncInvestmentTransactions(ctx context.Context, deps apiDependencies, endDa
 }
 
 // Resolves portfolio value on or nearest to date using daily then monthly snapshots.
+// Monthly rows are stored as end-of-month dates (e.g. 2026-03-31), so monthly lookup
+// uses the full calendar month range rather than the 1st alone.
 func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date time.Time) (int64, time.Time, error) {
 	day := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
 
@@ -204,7 +206,7 @@ func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date t
 		return dailies[0].PortfolioValueCents, dailies[0].Date.Time, nil
 	}
 
-	// Nearest daily within ±7 days (prefer on/after, then before).
+	// Nearest daily within ±7 days.
 	windowStart := day.AddDate(0, 0, -7)
 	windowEnd := day.AddDate(0, 0, 7)
 	nearby, err := db.ListDailySnapshots(ctx, windowStart, windowEnd)
@@ -215,9 +217,9 @@ func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date t
 	bestDist := int64(1 << 60)
 	for i := range nearby {
 		s := &nearby[i]
-		dist := absInt64(s.Date.Time.Sub(day).Hours() / 24)
+		dist := daysBetweenAbs(s.Date.Time, day)
 		if dist < bestDist {
-			bestDist = int64(dist)
+			bestDist = dist
 			best = s
 		}
 	}
@@ -225,36 +227,58 @@ func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date t
 		return best.PortfolioValueCents, best.Date.Time, nil
 	}
 
-	// Fall back to monthly EOM for the month containing date (sum across accounts).
-	monthStart := time.Date(day.Year(), day.Month(), 1, 0, 0, 0, 0, time.UTC)
-	monthlies, err := db.ListMonthlySnapshots(ctx, monthStart, monthStart)
+	// Fall back to monthly snapshots for the month containing date (EOM storage).
+	sum, monthDate, err := sumMonthlyForCalendarMonth(ctx, db, day.Year(), day.Month())
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if monthDate.IsZero() {
+		// Try previous calendar month.
+		prev := day.AddDate(0, -1, 0)
+		sum, monthDate, err = sumMonthlyForCalendarMonth(ctx, db, prev.Year(), prev.Month())
+		if err != nil {
+			return 0, time.Time{}, err
+		}
+	}
+	if monthDate.IsZero() {
+		return 0, time.Time{}, nil
+	}
+	return sum, monthDate, nil
+}
+
+// Sums monthly_snapshots for a calendar month. Months are stored as last-day dates.
+func sumMonthlyForCalendarMonth(ctx context.Context, db *database.Client, year int, month time.Month) (int64, time.Time, error) {
+	first, last := calendarMonthBounds(year, month)
+	monthlies, err := db.ListMonthlySnapshots(ctx, first, last)
 	if err != nil {
 		return 0, time.Time{}, err
 	}
 	if len(monthlies) == 0 {
-		// Try previous month EOM.
-		prev := monthStart.AddDate(0, -1, 0)
-		monthlies, err = db.ListMonthlySnapshots(ctx, prev, prev)
-		if err != nil {
-			return 0, time.Time{}, err
-		}
-		monthStart = prev
-	}
-	var sum int64
-	for _, m := range monthlies {
-		sum += m.PortfolioValueCents
-	}
-	if len(monthlies) == 0 {
 		return 0, time.Time{}, nil
 	}
-	return sum, monthStart, nil
+	var sum int64
+	var asOf time.Time
+	for _, m := range monthlies {
+		sum += m.PortfolioValueCents
+		if asOf.IsZero() || m.Month.Time.After(asOf) {
+			asOf = m.Month.Time
+		}
+	}
+	return sum, asOf, nil
 }
 
-func absInt64(v float64) int64 {
-	if v < 0 {
-		return int64(-v)
+func calendarMonthBounds(year int, month time.Month) (first, last time.Time) {
+	first = time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+	last = time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC)
+	return first, last
+}
+
+func daysBetweenAbs(a, b time.Time) int64 {
+	hours := a.Sub(b).Hours()
+	if hours < 0 {
+		hours = -hours
 	}
-	return int64(v)
+	return int64(hours / 24)
 }
 
 // Finds the earliest date we can use as all-time start (daily preferred, else monthly).
@@ -317,21 +341,27 @@ func handleGetPortfolioPerformance(w http.ResponseWriter, r *http.Request, deps 
 	now := GetLocalNow()
 	endDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 
+	earliest, err := earliestPerformanceStart(r.Context(), deps.db)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to resolve start date: "+err.Error())
+		return
+	}
+	if earliest.IsZero() {
+		writeJSONError(w, http.StatusNotFound, "no portfolio snapshots available")
+		return
+	}
+	earliest = time.Date(earliest.Year(), earliest.Month(), earliest.Day(), 0, 0, 0, 0, loc)
+
 	var startDate time.Time
 	switch rangeParam {
 	case "ytd":
 		startDate = time.Date(now.Year(), 1, 1, 0, 0, 0, 0, loc)
+		// Clamp to earliest available data when YTD starts before we have snapshots.
+		if startDate.Before(earliest) {
+			startDate = earliest
+		}
 	case "all":
-		earliest, err := earliestPerformanceStart(r.Context(), deps.db)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to resolve start date: "+err.Error())
-			return
-		}
-		if earliest.IsZero() {
-			writeJSONError(w, http.StatusNotFound, "no portfolio snapshots available")
-			return
-		}
-		startDate = earliest.In(loc)
+		startDate = earliest
 	default:
 		writeJSONError(w, http.StatusBadRequest, "range must be all or ytd")
 		return
@@ -341,6 +371,14 @@ func handleGetPortfolioPerformance(w http.ResponseWriter, r *http.Request, deps 
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to resolve start value: "+err.Error())
 		return
+	}
+	// If the chosen start still has no resolvable value, fall back to earliest snapshot date.
+	if actualStart.IsZero() && !startDate.Equal(earliest) {
+		startValue, actualStart, err = resolvePortfolioValueCents(r.Context(), deps.db, earliest)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to resolve start value: "+err.Error())
+			return
+		}
 	}
 	if actualStart.IsZero() {
 		writeJSONError(w, http.StatusNotFound, "no portfolio value at start of range")
