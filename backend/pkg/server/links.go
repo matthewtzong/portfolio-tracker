@@ -267,6 +267,9 @@ func handleExchangePlaidPublicToken(w http.ResponseWriter, r *http.Request, deps
 	// Trigger initial transaction sync immediately after linking/reconnecting.
 	_ = SyncTransactionsForItem(r.Context(), deps.db, deps.plaidClient, item)
 
+	// Backfill investment transactions for contribution-adjusted performance.
+	_, _ = syncInvestmentTransactions(r.Context(), deps, GetLocalNow())
+
 	// Return the item ID.
 	resp := exchangeTokenResponse{ItemID: itemID}
 	_ = json.NewEncoder(w).Encode(resp)

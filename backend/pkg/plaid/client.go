@@ -62,6 +62,45 @@ func (c *Client) GetHoldings(ctx context.Context, accessToken string) ([]PlaidHo
 	return resp.Holdings, resp.Securities, nil
 }
 
+// Fetches all investment transactions for an Item between startDate and endDate (YYYY-MM-DD), paginating as needed.
+func (c *Client) GetInvestmentTransactions(ctx context.Context, accessToken, startDate, endDate string) ([]PlaidInvestmentTransaction, []PlaidSecurity, error) {
+	const pageSize = 500
+	offset := 0
+	var all []PlaidInvestmentTransaction
+	var securities []PlaidSecurity
+	securitySeen := make(map[string]bool)
+
+	for {
+		reqBody := investmentsTransactionsGetRequest{
+			ClientID:    c.clientID,
+			Secret:      c.secret,
+			AccessToken: accessToken,
+			StartDate:   startDate,
+			EndDate:     endDate,
+			Options: &investmentsTransactionsOptions{
+				Count:  pageSize,
+				Offset: offset,
+			},
+		}
+		var resp investmentsTransactionsGetResponse
+		if err := c.postJSON(ctx, "/investments/transactions/get", reqBody, &resp); err != nil {
+			return nil, nil, err
+		}
+		all = append(all, resp.InvestmentTransactions...)
+		for _, sec := range resp.Securities {
+			if !securitySeen[sec.SecurityID] {
+				securitySeen[sec.SecurityID] = true
+				securities = append(securities, sec)
+			}
+		}
+		if len(all) >= resp.TotalInvestmentTransactions || len(resp.InvestmentTransactions) == 0 {
+			break
+		}
+		offset += len(resp.InvestmentTransactions)
+	}
+	return all, securities, nil
+}
+
 // Creates a Plaid Link token for the given user.
 func (c *Client) CreateLinkToken(ctx context.Context, userID, webhookURL string, products []string) (string, error) {
 	return c.CreateLinkTokenWithAccessToken(ctx, userID, "", webhookURL, products)
@@ -476,4 +515,40 @@ type PlaidSecurity struct {
 	Name       *string `json:"name"`
 	Type       string  `json:"type"`
 	ClosePrice float64 `json:"close_price,omitempty"`
+}
+
+// Request body for /investments/transactions/get.
+type investmentsTransactionsGetRequest struct {
+	ClientID    string                          `json:"client_id"`
+	Secret      string                          `json:"secret"`
+	AccessToken string                          `json:"access_token"`
+	StartDate   string                          `json:"start_date"`
+	EndDate     string                          `json:"end_date"`
+	Options     *investmentsTransactionsOptions `json:"options,omitempty"`
+}
+
+type investmentsTransactionsOptions struct {
+	Count  int `json:"count"`
+	Offset int `json:"offset"`
+}
+
+// Response body for /investments/transactions/get.
+type investmentsTransactionsGetResponse struct {
+	InvestmentTransactions      []PlaidInvestmentTransaction `json:"investment_transactions"`
+	Securities                  []PlaidSecurity              `json:"securities"`
+	TotalInvestmentTransactions int                          `json:"total_investment_transactions"`
+}
+
+// A single Plaid investment transaction.
+type PlaidInvestmentTransaction struct {
+	InvestmentTransactionID string  `json:"investment_transaction_id"`
+	AccountID               string  `json:"account_id"`
+	SecurityID              *string `json:"security_id"`
+	Date                    string  `json:"date"`
+	Name                    string  `json:"name"`
+	Quantity                float64 `json:"quantity"`
+	Amount                  float64 `json:"amount"`
+	Price                   float64 `json:"price"`
+	Type                    string  `json:"type"`
+	Subtype                 string  `json:"subtype"`
 }

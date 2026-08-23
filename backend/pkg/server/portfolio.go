@@ -108,6 +108,15 @@ func registerPortfolioRoutes(mux *http.ServeMux, deps apiDependencies) {
 		}
 		handleGetYearlyPortfolioSummary(w, r, deps)
 	})))
+
+	// GET /api/portfolio/performance returns contribution-adjusted return (Modified Dietz).
+	mux.Handle("/api/portfolio/performance", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		handleGetPortfolioPerformance(w, r, deps)
+	})))
 }
 
 // Fetches current holdings from Plaid.

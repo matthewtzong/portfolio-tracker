@@ -54,6 +54,19 @@ interface YearlyPortfolioSummaryResponse {
   byAccount: YearlyPortfolioAccount[]
 }
 
+// Contribution-adjusted portfolio performance (Modified Dietz).
+interface PerformanceResponse {
+  range: string
+  startDate: string
+  endDate: string
+  startValueCents: number
+  endValueCents: number
+  netContributionsCents: number
+  gainCents: number
+  returnBps: number
+  method: string
+}
+
 const START_MONTH = '2026-03'
 const START_YEAR = 2026
 
@@ -70,6 +83,17 @@ function formatCurrency(cents: number): string {
     style: 'currency',
     currency: 'USD',
   }).format(cents / 100)
+}
+
+function formatReturnPct(bps: number): string {
+  const pct = bps / 100
+  const sign = pct > 0 ? '+' : ''
+  return `${sign}${pct.toFixed(2)}%`
+}
+
+function formatSignedCurrency(cents: number): string {
+  const sign = cents > 0 ? '+' : cents < 0 ? '-' : ''
+  return `${sign}${formatCurrency(Math.abs(cents))}`
 }
 
 export function Portfolio() {
@@ -99,6 +123,11 @@ export function Portfolio() {
   const [yearlySummary, setYearlySummary] = useState<YearlyPortfolioSummaryResponse | null>(null)
   const [yearlySummaryLoading, setYearlySummaryLoading] = useState(false)
   const [yearlySummaryError, setYearlySummaryError] = useState<string | null>(null)
+
+  const [perfRange, setPerfRange] = useState<'all' | 'ytd'>('all')
+  const [performance, setPerformance] = useState<PerformanceResponse | null>(null)
+  const [performanceLoading, setPerformanceLoading] = useState(false)
+  const [performanceError, setPerformanceError] = useState<string | null>(null)
 
   // const [uploadMessage, setUploadMessage] = useState<{
   //   text: string
@@ -139,11 +168,34 @@ export function Portfolio() {
     }
   }, [])
 
+  // Loads contribution-adjusted performance (Modified Dietz).
+  const loadPerformance = useCallback(async (range: 'all' | 'ytd') => {
+    setPerformanceLoading(true)
+    setPerformanceError(null)
+    try {
+      const data = await apiRequest<PerformanceResponse>(
+        `/api/portfolio/performance?range=${range}`,
+      )
+      setPerformance(data)
+    } catch (err) {
+      setPerformance(null)
+      setPerformanceError(
+        err instanceof Error ? err.message : 'Failed to load performance',
+      )
+    } finally {
+      setPerformanceLoading(false)
+    }
+  }, [])
+
   // Loads the holdings and snapshots on mount.
   useEffect(() => {
     loadHoldings()
     loadSnapshots()
   }, [loadHoldings, loadSnapshots])
+
+  useEffect(() => {
+    loadPerformance(perfRange)
+  }, [loadPerformance, perfRange])
 
   // Loads yearly portfolio summary by account.
   const loadYearlySummary = useCallback(async () => {
@@ -485,6 +537,94 @@ export function Portfolio() {
           <p className="text-5xl font-bold text-white tracking-tighter">
             {formatCurrency(totalPortfolioValue)}
           </p>
+        )}
+      </div>
+
+      {/* Contribution-adjusted performance (excl. deposits/withdrawals) */}
+      <div className="mb-8 bg-card border border-border rounded-4xl p-8 shadow-2xl">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+          <div>
+            <h2 className="text-xl font-bold text-white tracking-tight">Performance</h2>
+            <p className="text-zinc-500 text-sm mt-1">
+              Gain and return excluding contributions and withdrawals (includes sold positions
+              that stayed as cash).
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setPerfRange('all')}
+              className={`px-4 py-2 text-sm font-bold rounded-full transition-all ${
+                perfRange === 'all'
+                  ? 'bg-primary text-background'
+                  : 'bg-zinc-900 text-zinc-300 border border-border hover:border-zinc-500'
+              }`}
+            >
+              All time
+            </button>
+            <button
+              type="button"
+              onClick={() => setPerfRange('ytd')}
+              className={`px-4 py-2 text-sm font-bold rounded-full transition-all ${
+                perfRange === 'ytd'
+                  ? 'bg-primary text-background'
+                  : 'bg-zinc-900 text-zinc-300 border border-border hover:border-zinc-500'
+              }`}
+            >
+              YTD
+            </button>
+          </div>
+        </div>
+        {performanceLoading && (
+          <div className="h-16 w-64 bg-zinc-800 animate-pulse rounded-lg" />
+        )}
+        {performanceError && !performanceLoading && (
+          <p className="text-sm text-zinc-500 font-medium">
+            {performanceError.includes('404') || performanceError.toLowerCase().includes('no portfolio')
+              ? 'Not enough snapshot or investment-transaction data yet. Performance appears after nightly sync.'
+              : performanceError}
+          </p>
+        )}
+        {performance && !performanceLoading && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            <div>
+              <p className="text-zinc-500 text-xs font-medium uppercase tracking-wide mb-1">
+                Return
+              </p>
+              <p
+                className={`text-3xl font-bold tracking-tight ${
+                  performance.returnBps >= 0 ? 'text-primary' : 'text-red-400'
+                }`}
+              >
+                {formatReturnPct(performance.returnBps)}
+              </p>
+            </div>
+            <div>
+              <p className="text-zinc-500 text-xs font-medium uppercase tracking-wide mb-1">
+                Gain
+              </p>
+              <p
+                className={`text-3xl font-bold tracking-tight ${
+                  performance.gainCents >= 0 ? 'text-white' : 'text-red-400'
+                }`}
+              >
+                {formatSignedCurrency(performance.gainCents)}
+              </p>
+            </div>
+            <div>
+              <p className="text-zinc-500 text-xs font-medium uppercase tracking-wide mb-1">
+                Net contributions
+              </p>
+              <p className="text-3xl font-bold text-zinc-300 tracking-tight">
+                {formatSignedCurrency(performance.netContributionsCents)}
+              </p>
+            </div>
+            <p className="sm:col-span-3 text-xs text-zinc-600">
+              {performance.startDate} → {performance.endDate} · Modified Dietz · start{' '}
+              {formatCurrency(performance.startValueCents)} · end{' '}
+              {formatCurrency(performance.endValueCents)}
+            </p>
+          </div>
         )}
       </div>
 

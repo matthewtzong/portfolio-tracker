@@ -835,10 +835,10 @@ func (c *Client) GetTransactionsByPlaidIDs(ctx context.Context, plaidIDs []strin
 // Updates category, review status, and optional note for a transaction.
 func (c *Client) UpdateTransactionReview(ctx context.Context, id int64, categoryID int64, reviewStatus string, userNote *string) error {
 	payload := map[string]interface{}{
-		"category_id":    categoryID,
-		"review_status":  reviewStatus,
-		"user_note":      userNote,
-		"updated_at":     time.Now().UTC().Format(time.RFC3339),
+		"category_id":   categoryID,
+		"review_status": reviewStatus,
+		"user_note":     userNote,
+		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
 	reqURL := c.restURL("transactions") + fmt.Sprintf("?id=eq.%d", id)
 	resp, err := c.doRequest(ctx, http.MethodPatch, reqURL, payload)
@@ -1558,17 +1558,17 @@ type Category struct {
 // Category rule maps transaction name/merchant substring to a category.
 // Optional PlaidAccountID scopes the rule to a single account (nil = any account).
 type CategoryRule struct {
-	ID            int64   `json:"id,omitempty"`
-	MatchString   string  `json:"match_string"`
-	CategoryID    int64   `json:"category_id"`
+	ID             int64   `json:"id,omitempty"`
+	MatchString    string  `json:"match_string"`
+	CategoryID     int64   `json:"category_id"`
 	PlaidAccountID *string `json:"plaid_account_id,omitempty"`
 }
 
 // Review status for transactions that need manual categorization (e.g. Venmo).
 const (
-	ReviewStatusNone         = "none"
-	ReviewStatusPending      = "pending"
-	ReviewStatusCategorized  = "categorized"
+	ReviewStatusNone        = "none"
+	ReviewStatusPending     = "pending"
+	ReviewStatusCategorized = "categorized"
 )
 
 // Represents a row in the transactions table.
@@ -1875,4 +1875,128 @@ func (c *Client) UpsertAllocationSettings(ctx context.Context, settings *Allocat
 		return fmt.Errorf("supabase upsert allocation_settings failed: %s", string(body))
 	}
 	return nil
+}
+
+// Represents a row in the investment_transactions table.
+type InvestmentTransaction struct {
+	ID                           int64      `json:"id,omitempty"`
+	PlaidInvestmentTransactionID string     `json:"plaid_investment_transaction_id"`
+	AccountID                    string     `json:"account_id"`
+	Date                         DateOnly   `json:"date"`
+	Name                         string     `json:"name"`
+	Type                         string     `json:"type"`
+	Subtype                      string     `json:"subtype"`
+	AmountCents                  int64      `json:"amount_cents"`
+	Quantity                     *float64   `json:"quantity,omitempty"`
+	Price                        *float64   `json:"price,omitempty"`
+	SecurityID                   *string    `json:"security_id,omitempty"`
+	Symbol                       *string    `json:"symbol,omitempty"`
+	CreatedAt                    *time.Time `json:"created_at,omitempty"`
+}
+
+// Inserts or updates investment transactions by Plaid ID.
+func (c *Client) UpsertInvestmentTransactions(ctx context.Context, txns []InvestmentTransaction) error {
+	if len(txns) == 0 {
+		return nil
+	}
+	url := c.restURL("investment_transactions") + "?on_conflict=plaid_investment_transaction_id"
+	resp, err := c.doRequest(ctx, http.MethodPost, url, txns)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase upsert investment_transactions failed: %s", string(body))
+	}
+	return nil
+}
+
+// Lists investment transactions in [startDate, endDate], ordered by date ascending.
+func (c *Client) ListInvestmentTransactions(ctx context.Context, startDate, endDate time.Time) ([]InvestmentTransaction, error) {
+	startStr := startDate.Format("2006-01-02")
+	endStr := endDate.Format("2006-01-02")
+	url := c.restURL("investment_transactions") + fmt.Sprintf(
+		"?date=gte.%s&date=lte.%s&order=date.asc", startStr, endStr,
+	)
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase list investment_transactions failed: %s", string(body))
+	}
+	var txns []InvestmentTransaction
+	if err := json.NewDecoder(resp.Body).Decode(&txns); err != nil {
+		return nil, err
+	}
+	return txns, nil
+}
+
+// Returns the earliest daily snapshot, or nil if none exist.
+func (c *Client) GetEarliestDailySnapshot(ctx context.Context) (*DailySnapshot, error) {
+	url := c.restURL("daily_snapshots") + "?order=date.asc&limit=1"
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get earliest daily_snapshots failed: %s", string(body))
+	}
+	var rows []DailySnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+// Returns the latest daily snapshot, or nil if none exist.
+func (c *Client) GetLatestDailySnapshot(ctx context.Context) (*DailySnapshot, error) {
+	url := c.restURL("daily_snapshots") + "?order=date.desc&limit=1"
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get latest daily_snapshots failed: %s", string(body))
+	}
+	var rows []DailySnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+// Returns the earliest monthly snapshot month (any account), or nil if none exist.
+func (c *Client) GetEarliestMonthlySnapshot(ctx context.Context) (*MonthlySnapshot, error) {
+	url := c.restURL("monthly_snapshots") + "?order=month.asc&limit=1"
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get earliest monthly_snapshots failed: %s", string(body))
+	}
+	var rows []MonthlySnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
 }

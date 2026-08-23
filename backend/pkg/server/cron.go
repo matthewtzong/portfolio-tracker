@@ -18,9 +18,10 @@ import (
 
 // Cron Response.
 type cronSyncResponse struct {
-	PlaidSyncedItems        int  `json:"plaidSyncedItems"`
-	DailySnapshotWritten    bool `json:"dailySnapshotWritten"`
-	MonthlySnapshotsWritten int  `json:"monthlySnapshotsWritten"`
+	PlaidSyncedItems               int  `json:"plaidSyncedItems"`
+	DailySnapshotWritten           bool `json:"dailySnapshotWritten"`
+	MonthlySnapshotsWritten        int  `json:"monthlySnapshotsWritten"`
+	InvestmentTransactionsUpserted int  `json:"investmentTransactionsUpserted"`
 }
 
 // Registers cron routes.
@@ -75,6 +76,12 @@ func handleDailySync(w http.ResponseWriter, r *http.Request, deps apiDependencie
 		return
 	}
 
+	// Sync investment transactions for contribution-adjusted performance.
+	invTxnCount, err := syncInvestmentTransactions(r.Context(), deps, targetDate)
+	if err != nil {
+		log.Printf("cron: investment transactions sync error: %v", err)
+	}
+
 	/*
 		// Fetch Snaptrade holdings/balances and write today's snapshots.
 		dailyWritten, monthlyWritten, err := writeSnaptradeSnapshotsForToday(r, deps)
@@ -89,8 +96,9 @@ func handleDailySync(w http.ResponseWriter, r *http.Request, deps apiDependencie
 
 	// Returns the response.
 	resp := cronSyncResponse{
-		PlaidSyncedItems:     plaidSynced,
-		DailySnapshotWritten: dailyWritten,
+		PlaidSyncedItems:               plaidSynced,
+		DailySnapshotWritten:           dailyWritten,
+		InvestmentTransactionsUpserted: invTxnCount,
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
