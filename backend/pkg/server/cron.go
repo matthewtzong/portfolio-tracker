@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/matthewtzong/portfolio-tracker/backend/pkg/database"
@@ -184,15 +185,30 @@ func writeInvestmentSnapshotsForDate(r *http.Request, deps apiDependencies, date
 			continue
 		}
 
-		// Map security IDs to tickers.
+		// Map security IDs to tickers and upsert asset class from Plaid Type.
 		securityTickerMap := make(map[string]string)
 		for _, sec := range securities {
+			var ticker string
 			if sec.Ticker != nil {
-				securityTickerMap[sec.SecurityID] = *sec.Ticker
+				ticker = *sec.Ticker
 			} else if sec.Name != nil {
-				securityTickerMap[sec.SecurityID] = *sec.Name
+				ticker = *sec.Name
 			} else {
-				securityTickerMap[sec.SecurityID] = "UNKNOWN"
+				ticker = "UNKNOWN"
+			}
+			securityTickerMap[sec.SecurityID] = ticker
+
+			if ticker == "" || ticker == "UNKNOWN" {
+				continue
+			}
+			assetClass, source := mapPlaidTypeToAssetClass(sec.Type, ticker)
+			err = deps.db.UpsertSecurityIfNotUser(r.Context(), &database.Security{
+				Symbol:     strings.ToUpper(strings.TrimSpace(ticker)),
+				AssetClass: assetClass,
+				Source:     source,
+			})
+			if err != nil {
+				log.Printf("cron: failed to upsert security %s: %v", ticker, err)
 			}
 		}
 

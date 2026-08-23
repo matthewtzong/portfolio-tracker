@@ -54,6 +54,14 @@ export function AppHeader() {
               Portfolio
             </NavLink>
             <NavLink
+              to="/allocations"
+              className={({ isActive: active }) =>
+                `${navLinkClass} ${active ? navLinkActive : navLinkDefault}`
+              }
+            >
+              Allocations
+            </NavLink>
+            <NavLink
               to="/accounts"
               className={({ isActive: active }) =>
                 `${navLinkClass} ${active ? navLinkActive : navLinkDefault}`

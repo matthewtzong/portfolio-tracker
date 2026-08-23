@@ -6,6 +6,7 @@ import { ProtectedRoute } from './components/ProtectedRoute'
 import { LinkManagement } from './components/LinkManagement'
 import { BudgetTracker } from './components/BudgetTracker'
 import { Portfolio } from './components/Portfolio'
+import { Allocations } from './components/Allocations'
 import { Accounts } from './components/Accounts'
 import { MainLayout } from './components/MainLayout'
 
@@ -19,6 +20,7 @@ Route graph:
  - `/expenses`: protected expense tracker (transactions by month/category)
  - `/budget`: protected budget tracker (global budgets, monthly spent vs budget)
  - `/portfolio`: protected portfolio view (holdings, daily/monthly snapshots)
+ - `/allocations`: protected allocations (weights, targets, movers)
 */
 function App() {
   return (
@@ -39,6 +41,7 @@ function App() {
           <Route path="expenses" element={<ExpenseTracker />} />
           <Route path="budget" element={<BudgetTracker />} />
           <Route path="portfolio" element={<Portfolio />} />
+          <Route path="allocations" element={<Allocations />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -163,7 +163,7 @@ export function LinkManagement() {
 
       {/* Add new connections cards */}
       <div className="grid gap-8 md:grid-cols-2 lg:grid-cols-3 mb-12">
-        <div className="p-8 bg-zinc-900 border border-border rounded-4xl group hover:border-blue-500/30 transition-all shadow-xl relative overflow-hidden">
+      <div className="p-8 bg-zinc-900 border border-border rounded-4xl group hover:border-purple-500/30 transition-all shadow-xl relative overflow-hidden text-center md:col-span-2 lg:col-span-1">
           <div className="absolute -right-4 -top-4 w-24 h-24 bg-blue-500/5 rounded-full blur-2xl group-hover:bg-blue-500/10 transition-all" />
           <div className="relative">
             <h2 className="text-xl font-bold text-white mb-2">Banking & Credit</h2>
@@ -174,7 +174,7 @@ export function LinkManagement() {
           </div>
         </div>
 
-        <div className="p-8 bg-zinc-900 border border-border rounded-4xl group hover:border-emerald-500/30 transition-all shadow-xl relative overflow-hidden">
+        <div className="p-8 bg-zinc-900 border border-border rounded-4xl group hover:border-purple-500/30 transition-all shadow-xl relative overflow-hidden text-center md:col-span-2 lg:col-span-1">
           <div className="absolute -right-4 -top-4 w-24 h-24 bg-emerald-500/5 rounded-full blur-2xl group-hover:bg-emerald-500/10 transition-all" />
           <div className="relative">
             <h2 className="text-xl font-bold text-white mb-2">Investments</h2>

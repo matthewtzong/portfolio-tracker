@@ -1578,3 +1578,208 @@ type YearlyPortfolioSummary struct {
 	PortfolioValueCents int64      `json:"portfolio_value_cents"`
 	CreatedAt           *time.Time `json:"created_at,omitempty"`
 }
+
+// Represents a row in the securities table.
+type Security struct {
+	Symbol     string     `json:"symbol"`
+	AssetClass string     `json:"asset_class"`
+	Source     string     `json:"source"`
+	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
+}
+
+// Represents a row in the allocation_targets table.
+type AllocationTarget struct {
+	ID        int64      `json:"id,omitempty"`
+	Kind      string     `json:"kind"`
+	Key       string     `json:"key"`
+	TargetBps int        `json:"target_bps"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+// Represents the singleton allocation_settings row.
+type AllocationSettings struct {
+	ID                int64      `json:"id"`
+	DriftWarnBps      int        `json:"drift_warn_bps"`
+	SingleStockMaxBps int        `json:"single_stock_max_bps"`
+	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+}
+
+// Returns a security by symbol, or nil if not found.
+func (c *Client) GetSecurity(ctx context.Context, symbol string) (*Security, error) {
+	url := c.restURL("securities") + "?symbol=eq." + url.QueryEscape(symbol) + "&limit=1"
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get security failed: %s", string(body))
+	}
+
+	var rows []Security
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+// Lists all securities.
+func (c *Client) ListSecurities(ctx context.Context) ([]Security, error) {
+	url := c.restURL("securities") + "?select=*&order=symbol.asc"
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase list securities failed: %s", string(body))
+	}
+
+	var rows []Security
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// Inserts or updates a security row (merge on symbol).
+func (c *Client) UpsertSecurity(ctx context.Context, security *Security) error {
+	if security == nil {
+		return errors.New("security is nil")
+	}
+
+	url := c.restURL("securities") + "?on_conflict=symbol"
+	resp, err := c.doRequest(ctx, http.MethodPost, url, security)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase upsert security failed: %s", string(body))
+	}
+	return nil
+}
+
+// Upserts a security unless an existing row has source=user (user overrides win).
+func (c *Client) UpsertSecurityIfNotUser(ctx context.Context, security *Security) error {
+	if security == nil {
+		return errors.New("security is nil")
+	}
+	existing, err := c.GetSecurity(ctx, security.Symbol)
+	if err != nil {
+		return err
+	}
+	if existing != nil && existing.Source == "user" {
+		return nil
+	}
+	return c.UpsertSecurity(ctx, security)
+}
+
+// Lists all allocation targets.
+func (c *Client) ListAllocationTargets(ctx context.Context) ([]AllocationTarget, error) {
+	url := c.restURL("allocation_targets") + "?select=*&order=id.asc"
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase list allocation_targets failed: %s", string(body))
+	}
+
+	var rows []AllocationTarget
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// Deletes all allocation targets.
+func (c *Client) DeleteAllAllocationTargets(ctx context.Context) error {
+	url := c.restURL("allocation_targets") + "?id=gt.0"
+	resp, err := c.doRequest(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase delete allocation_targets failed: %s", string(body))
+	}
+	return nil
+}
+
+// Inserts allocation targets (batch).
+func (c *Client) InsertAllocationTargets(ctx context.Context, targets []AllocationTarget) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	url := c.restURL("allocation_targets")
+	resp, err := c.doRequest(ctx, http.MethodPost, url, targets)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase insert allocation_targets failed: %s", string(body))
+	}
+	return nil
+}
+
+// Returns allocation settings (singleton id=1), or nil if missing.
+func (c *Client) GetAllocationSettings(ctx context.Context) (*AllocationSettings, error) {
+	url := c.restURL("allocation_settings") + "?id=eq.1&limit=1"
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase get allocation_settings failed: %s", string(body))
+	}
+
+	var rows []AllocationSettings
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+// Updates allocation settings (id=1).
+func (c *Client) UpsertAllocationSettings(ctx context.Context, settings *AllocationSettings) error {
+	if settings == nil {
+		return errors.New("settings is nil")
+	}
+	settings.ID = 1
+	url := c.restURL("allocation_settings") + "?id=eq.1"
+	resp, err := c.doRequest(ctx, http.MethodPatch, url, settings)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase upsert allocation_settings failed: %s", string(body))
+	}
+	return nil
+}

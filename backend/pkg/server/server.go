@@ -103,6 +103,7 @@ func NewHandler() (http.Handler, error) {
 	registerAccountsRoutes(mux, deps)
 	registerTransactionsRoutes(mux, deps)
 	registerPortfolioRoutes(mux, deps)
+	registerAllocationRoutes(mux, deps)
 	registerCronRoutes(mux, deps)
 	registerExportRoutes(mux, deps)
 	// registerFidelityRoutes(mux, deps)
