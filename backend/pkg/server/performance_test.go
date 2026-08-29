@@ -17,6 +17,8 @@ func TestClassifyExternalCashFlow(t *testing.T) {
 		{"deposit credits cash", "cash", "deposit", -500000, 500000, true},
 		{"withdrawal debits cash", "cash", "withdrawal", 200000, -200000, true},
 		{"contribution", "cash", "contribution", -100000, 100000, true},
+		{"401k buy contribution", "buy", "contribution", 100000, 100000, true},
+		{"employer contribution subtype", "cash", "employer contribution", -50000, 50000, true},
 		{"transfer in", "transfer", "transfer", -50000, 50000, true},
 		{"buy is internal", "buy", "buy", 100000, 0, false},
 		{"sell is internal", "sell", "sell", -100000, 0, false},
@@ -110,6 +112,24 @@ func TestInvestmentTxnSyncWindowEmptyUsesFloor(t *testing.T) {
 	start := investmentTxnHistoryFloor
 	if start.Format("2006-01-02") != "2026-03-31" {
 		t.Fatalf("floor=%s, want 2026-03-31", start.Format("2006-01-02"))
+	}
+}
+
+func TestMoMStartUsesPriorMonthEnd(t *testing.T) {
+	loc := time.FixedZone("test", -4*3600)
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, loc)
+	earliest := time.Date(2026, 3, 31, 0, 0, 0, 0, loc)
+	endDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+
+	start, rangeName, err := resolvePerformanceStartDate("mom", now, earliest, endDate, loc)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if rangeName != "mom" {
+		t.Fatalf("range=%s, want mom", rangeName)
+	}
+	if start.Format("2006-01-02") != "2026-07-31" {
+		t.Fatalf("start=%s, want 2026-07-31", start.Format("2006-01-02"))
 	}
 }
 

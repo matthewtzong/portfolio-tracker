@@ -67,6 +67,11 @@ interface PerformanceResponse {
   method: string
 }
 
+interface PerformanceSummaryResponse {
+  dayOverDay?: PerformanceResponse
+  monthOverMonth?: PerformanceResponse
+}
+
 const START_MONTH = '2026-03'
 const START_YEAR = 2026
 
@@ -83,6 +88,23 @@ function formatCurrency(cents: number): string {
     style: 'currency',
     currency: 'USD',
   }).format(cents / 100)
+}
+
+function formatSnapshotDate(date: string): string {
+  const parsed = new Date(`${date}T12:00:00`)
+  if (Number.isNaN(parsed.getTime())) return date
+  return parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function formatGainPeriod(perf?: PerformanceResponse): string | null {
+  if (!perf?.startDate || !perf?.endDate) return null
+  return `${formatSnapshotDate(perf.startDate)} → ${formatSnapshotDate(perf.endDate)}`
+}
+
+function formatGainDelta(perf?: PerformanceResponse): string {
+  if (!perf) return '—'
+  const sign = perf.gainCents >= 0 ? '+' : ''
+  return `${sign}${formatCurrency(perf.gainCents)} (${sign}${(perf.returnBps / 100).toFixed(2)}%)`
 }
 
 function formatReturnPct(bps: number): string {
@@ -123,6 +145,12 @@ export function Portfolio() {
   const [yearlySummary, setYearlySummary] = useState<YearlyPortfolioSummaryResponse | null>(null)
   const [yearlySummaryLoading, setYearlySummaryLoading] = useState(false)
   const [yearlySummaryError, setYearlySummaryError] = useState<string | null>(null)
+
+  const [performanceSummary, setPerformanceSummary] = useState<PerformanceSummaryResponse | null>(
+    null,
+  )
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
 
   const [perfRange, setPerfRange] = useState<'all' | '1y' | 'ytd'>('all')
   const [performance, setPerformance] = useState<PerformanceResponse | null>(null)
@@ -168,7 +196,25 @@ export function Portfolio() {
     }
   }, [])
 
-  // Loads contribution-adjusted performance (Modified Dietz).
+  // Loads contribution-adjusted day/month performance (Modified Dietz).
+  const loadPerformanceSummary = useCallback(async () => {
+    setSummaryLoading(true)
+    setSummaryError(null)
+    try {
+      const data = await apiRequest<PerformanceSummaryResponse>(
+        '/api/portfolio/performance/summary',
+      )
+      setPerformanceSummary(data)
+    } catch (err) {
+      setPerformanceSummary(null)
+      setSummaryError(
+        err instanceof Error ? err.message : 'Failed to load performance summary',
+      )
+    } finally {
+      setSummaryLoading(false)
+    }
+  }, [])
+
   const loadPerformance = useCallback(async (range: 'all' | '1y' | 'ytd') => {
     setPerformanceLoading(true)
     setPerformanceError(null)
@@ -191,7 +237,8 @@ export function Portfolio() {
   useEffect(() => {
     loadHoldings()
     loadSnapshots()
-  }, [loadHoldings, loadSnapshots])
+    loadPerformanceSummary()
+  }, [loadHoldings, loadSnapshots, loadPerformanceSummary])
 
   useEffect(() => {
     loadPerformance(perfRange)
@@ -513,41 +560,99 @@ export function Portfolio() {
         </div>
       </div>
 
-      {/* Total portfolio value for the day */}
-      <div className="mb-8 bg-card border border-border rounded-4xl p-8 shadow-2xl relative overflow-hidden group">
-        <div className="absolute top-0 right-0 p-8">
-          <div className="bg-primary/10 border border-primary/20 rounded-full px-3 py-1 flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-            <span className="text-xs font-bold text-primary">Today's Value</span>
-          </div>
-        </div>
-        <h2 className="text-zinc-400 text-sm font-medium mb-1">Portfolio value today</h2>
+      {/* Portfolio value + short-term contribution-adjusted gains */}
+      <div className="mb-8 bg-card border border-border rounded-4xl p-6 sm:p-8 shadow-2xl relative overflow-hidden group">
         {holdingsError && (
           <p className="text-sm text-red-400 mb-4 font-medium">Error: {holdingsError}</p>
         )}
-        {holdingsLoading && !holdings.length && (
-          <div className="h-10 w-48 bg-zinc-800 animate-pulse rounded-lg" />
-        )}
-        {!holdingsLoading && holdings.length === 0 && !holdingsError && (
+        {holdingsLoading && !holdings.length ? (
+          <div className="h-24 bg-zinc-800 animate-pulse rounded-2xl" />
+        ) : holdings.length === 0 && !holdingsError ? (
           <p className="text-sm text-zinc-500 font-medium">
             No holdings. Connect an account to see positions.
           </p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="relative flex flex-col min-h-[7rem]">
+              <p className="text-zinc-400 text-sm font-medium mb-1">Portfolio value today</p>
+              <p className="text-5xl font-bold text-white tracking-tighter">
+                {formatCurrency(totalPortfolioValue)}
+              </p>
+              <div className="mt-auto self-end pt-3">
+                <div className="bg-primary/10 border border-primary/20 rounded-full px-3 py-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                  <span className="text-xs font-bold text-primary">Today&apos;s Value</span>
+                </div>
+              </div>
+            </div>
+            <div>
+              <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">
+                Day over day
+              </p>
+              {summaryLoading ? (
+                <div className="h-8 w-40 bg-zinc-800 animate-pulse rounded-lg" />
+              ) : (
+                <>
+                  <p
+                    className={`text-xl font-bold ${
+                      (performanceSummary?.dayOverDay?.gainCents ?? 0) >= 0
+                        ? 'text-green-400'
+                        : 'text-red-400'
+                    }`}
+                  >
+                    {formatGainDelta(performanceSummary?.dayOverDay)}
+                  </p>
+                  {formatGainPeriod(performanceSummary?.dayOverDay) && (
+                    <p className="text-[11px] text-zinc-500 mt-1">
+                      {formatGainPeriod(performanceSummary?.dayOverDay)}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+            <div>
+              <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">
+                Month over month
+              </p>
+              {summaryLoading ? (
+                <div className="h-8 w-40 bg-zinc-800 animate-pulse rounded-lg" />
+              ) : (
+                <>
+                  <p
+                    className={`text-xl font-bold ${
+                      (performanceSummary?.monthOverMonth?.gainCents ?? 0) >= 0
+                        ? 'text-green-400'
+                        : 'text-red-400'
+                    }`}
+                  >
+                    {formatGainDelta(performanceSummary?.monthOverMonth)}
+                  </p>
+                  {formatGainPeriod(performanceSummary?.monthOverMonth) && (
+                    <p className="text-[11px] text-zinc-500 mt-1">
+                      {formatGainPeriod(performanceSummary?.monthOverMonth)}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
         )}
-        {holdings.length > 0 && (
-          <p className="text-5xl font-bold text-white tracking-tighter">
-            {formatCurrency(totalPortfolioValue)}
+        {summaryError && !summaryLoading && holdings.length > 0 && (
+          <p className="text-xs text-zinc-600 mt-4">
+            {summaryError.includes('404') || summaryError.toLowerCase().includes('no portfolio')
+              ? 'Day/month gain metrics appear after nightly sync has snapshot and investment-transaction data.'
+              : summaryError}
           </p>
         )}
       </div>
 
-      {/* Contribution-adjusted performance (excl. deposits/withdrawals) */}
+      {/* Contribution-adjusted performance by range */}
       <div className="mb-8 bg-card border border-border rounded-4xl p-8 shadow-2xl">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
           <div>
             <h2 className="text-xl font-bold text-white tracking-tight">Performance</h2>
             <p className="text-zinc-500 text-sm mt-1">
-              Gain and return excluding contributions and withdrawals (includes sold positions
-              that stayed as cash).
+              Gain and return excluding contributions and withdrawals.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

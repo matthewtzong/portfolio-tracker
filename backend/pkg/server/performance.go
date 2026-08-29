@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,12 +42,27 @@ type modifiedDietzResult struct {
 	Method                string
 }
 
+// Returns true when Plaid subtype indicates an external contribution (e.g. contribution, employer contribution).
+func isContributionSubtype(subtype string) bool {
+	s := strings.ToLower(strings.TrimSpace(subtype))
+	return s == "contribution" || strings.Contains(s, "contribution")
+}
+
 // Classifies a Plaid investment transaction as an external cash flow.
 // Plaid: positive amount = cash debited (out); negative = cash credited (in).
 // Returns contribution cents (+ in, − out) and whether it is an external flow.
 func classifyExternalCashFlow(txnType, subtype string, amountCents int64) (contributionCents int64, isExternal bool) {
 	t := strings.ToLower(strings.TrimSpace(txnType))
 	s := strings.ToLower(strings.TrimSpace(subtype))
+
+	if isContributionSubtype(s) {
+		// Buy+contribution (common for 401k): amount is positive (purchase outflow).
+		if t == "buy" {
+			return amountCents, true
+		}
+		// Cash/transfer contribution: invert Plaid sign (deposit is negative amount).
+		return -amountCents, true
+	}
 
 	if t == "buy" || t == "sell" || t == "cancel" || t == "fee" {
 		return 0, false
@@ -323,6 +340,57 @@ func sumDailyHoldingsOnDate(ctx context.Context, db *database.Client, day time.T
 	return sum, true, nil
 }
 
+// Returns sorted unique dates with portfolio data (holdings or daily snapshots).
+func portfolioValueDates(ctx context.Context, db *database.Client, start, end time.Time) ([]time.Time, error) {
+	byKey := make(map[string]time.Time)
+
+	holdings, err := db.ListDailyHoldings(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+	for _, h := range holdings {
+		key := h.Date.Time.Format("2006-01-02")
+		byKey[key] = time.Date(h.Date.Time.Year(), h.Date.Time.Month(), h.Date.Time.Day(), 0, 0, 0, 0, time.UTC)
+	}
+
+	snapshots, err := db.ListDailySnapshots(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range snapshots {
+		key := s.Date.Time.Format("2006-01-02")
+		if _, ok := byKey[key]; !ok {
+			byKey[key] = time.Date(s.Date.Time.Year(), s.Date.Time.Month(), s.Date.Time.Day(), 0, 0, 0, 0, time.UTC)
+		}
+	}
+
+	dates := make([]time.Time, 0, len(byKey))
+	for _, d := range byKey {
+		dates = append(dates, d)
+	}
+	sort.Slice(dates, func(i, j int) bool {
+		return dates[i].Before(dates[j])
+	})
+	return dates, nil
+}
+
+// Portfolio value on an exact calendar day only (no nearest-day window).
+func resolvePortfolioValueOnExactDate(ctx context.Context, db *database.Client, day time.Time) (int64, bool, error) {
+	if sum, ok, err := sumDailyHoldingsOnDate(ctx, db, day); err != nil {
+		return 0, false, err
+	} else if ok {
+		return sum, true, nil
+	}
+	dailies, err := db.ListDailySnapshots(ctx, day, day)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(dailies) > 0 {
+		return dailies[0].PortfolioValueCents, true, nil
+	}
+	return 0, false, nil
+}
+
 // Sums monthly_snapshots for a calendar month. Months are stored as last-day dates.
 func sumMonthlyForCalendarMonth(ctx context.Context, db *database.Client, year int, month time.Month) (int64, time.Time, error) {
 	first, last := calendarMonthBounds(year, month)
@@ -399,6 +467,227 @@ type performanceResponseJSON struct {
 	Method                string `json:"method"`
 }
 
+type performanceSummaryJSON struct {
+	DayOverDay     *performanceResponseJSON `json:"dayOverDay,omitempty"`
+	MonthOverMonth *performanceResponseJSON `json:"monthOverMonth,omitempty"`
+}
+
+var (
+	errInvalidPerformanceRange = errors.New("invalid performance range")
+	errNoPortfolioSnapshots    = errors.New("no portfolio snapshots available")
+	errNoPortfolioValueAtStart = errors.New("no portfolio value at start of range")
+	errNoPortfolioValueAtEnd   = errors.New("no portfolio value at end of range")
+)
+
+func resolvePerformanceStartDate(rangeParam string, now, earliest, endDate time.Time, loc *time.Location) (time.Time, string, error) {
+	switch rangeParam {
+	case "1d", "day", "dod":
+		startDate := endDate.AddDate(0, 0, -1)
+		if startDate.Before(earliest) {
+			startDate = earliest
+		}
+		return startDate, "1d", nil
+	case "mom", "month":
+		firstOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
+		startDate := firstOfMonth.AddDate(0, 0, -1)
+		if startDate.Before(earliest) {
+			startDate = earliest
+		}
+		return startDate, "mom", nil
+	case "mtd":
+		startDate := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
+		if startDate.Before(earliest) {
+			startDate = earliest
+		}
+		return startDate, "mtd", nil
+	case "ytd":
+		startDate := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, loc)
+		if startDate.Before(earliest) {
+			startDate = earliest
+		}
+		return startDate, "ytd", nil
+	case "1y", "1year", "year":
+		startDate := endDate.AddDate(-1, 0, 0)
+		if startDate.Before(earliest) {
+			startDate = earliest
+		}
+		return startDate, "1y", nil
+	case "all":
+		return earliest, "all", nil
+	default:
+		return time.Time{}, "", errInvalidPerformanceRange
+	}
+}
+
+func computePortfolioPerformance(ctx context.Context, db *database.Client, rangeParam string) (*performanceResponseJSON, error) {
+	loc := GetLocalLocation()
+	now := GetLocalNow()
+	endDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+
+	earliest, err := earliestPerformanceStart(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if earliest.IsZero() {
+		return nil, errNoPortfolioSnapshots
+	}
+	earliest = time.Date(earliest.Year(), earliest.Month(), earliest.Day(), 0, 0, 0, 0, loc)
+
+	startDate, normalizedRange, err := resolvePerformanceStartDate(rangeParam, now, earliest, endDate, loc)
+	if err != nil {
+		return nil, err
+	}
+
+	var startValue, endValue int64
+	var actualStart, actualEnd time.Time
+
+	if normalizedRange == "1d" {
+		lookback := endDate.AddDate(0, 0, -30)
+		dates, err := portfolioValueDates(ctx, db, lookback, endDate)
+		if err != nil {
+			return nil, err
+		}
+		if len(dates) < 2 {
+			return nil, errNoPortfolioValueAtStart
+		}
+		actualStart = dates[len(dates)-2]
+		actualEnd = dates[len(dates)-1]
+		var ok bool
+		startValue, ok, err = resolvePortfolioValueOnExactDate(ctx, db, actualStart)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, errNoPortfolioValueAtStart
+		}
+		endValue, ok, err = resolvePortfolioValueOnExactDate(ctx, db, actualEnd)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, errNoPortfolioValueAtEnd
+		}
+	} else if normalizedRange == "mom" {
+		lookback := endDate.AddDate(0, -3, 0)
+		dates, err := portfolioValueDates(ctx, db, lookback, endDate)
+		if err != nil {
+			return nil, err
+		}
+		if len(dates) < 1 {
+			return nil, errNoPortfolioValueAtEnd
+		}
+		actualEnd = dates[len(dates)-1]
+		var ok bool
+		endValue, ok, err = resolvePortfolioValueOnExactDate(ctx, db, actualEnd)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, errNoPortfolioValueAtEnd
+		}
+
+		firstOfEndMonth := time.Date(actualEnd.Year(), actualEnd.Month(), 1, 0, 0, 0, 0, loc)
+		prevMonthLast := firstOfEndMonth.AddDate(0, 0, -1)
+
+		for i := len(dates) - 1; i >= 0; i-- {
+			d := dates[i]
+			if !d.After(prevMonthLast) {
+				actualStart = d
+				break
+			}
+		}
+		if !actualStart.IsZero() {
+			startValue, ok, err = resolvePortfolioValueOnExactDate(ctx, db, actualStart)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				actualStart = time.Time{}
+			}
+		}
+		if actualStart.IsZero() {
+			startValue, actualStart, err = resolvePortfolioValueCents(ctx, db, prevMonthLast)
+			if err != nil {
+				return nil, err
+			}
+			if actualStart.IsZero() {
+				monthlyValue, monthlyDate, mErr := sumMonthlyForCalendarMonth(ctx, db, prevMonthLast.Year(), prevMonthLast.Month())
+				if mErr != nil || monthlyDate.IsZero() {
+					return nil, errNoPortfolioValueAtStart
+				}
+				startValue = monthlyValue
+				actualStart = monthlyDate
+			}
+		}
+	} else {
+		startValue, actualStart, err = resolvePortfolioValueCents(ctx, db, startDate)
+		if err != nil {
+			return nil, err
+		}
+		if actualStart.IsZero() && !startDate.Equal(earliest) {
+			startValue, actualStart, err = resolvePortfolioValueCents(ctx, db, earliest)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if actualStart.IsZero() {
+			return nil, errNoPortfolioValueAtStart
+		}
+
+		endValue, actualEnd, err = resolvePortfolioValueCents(ctx, db, endDate)
+		if err != nil {
+			return nil, err
+		}
+		if actualEnd.IsZero() {
+			endValue, err = currentHoldingsTotalCents(ctx, db)
+			if err != nil || endValue == 0 {
+				return nil, errNoPortfolioValueAtEnd
+			}
+			actualEnd = endDate
+		}
+	}
+
+	txns, err := db.ListInvestmentTransactions(ctx, actualStart, actualEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	flows := make([]cashFlow, 0)
+	for _, t := range txns {
+		contrib, ok := classifyExternalCashFlow(t.Type, t.Subtype, t.AmountCents)
+		if !ok || contrib == 0 {
+			continue
+		}
+		flows = append(flows, cashFlow{Date: t.Date.Time, Amount: contrib})
+	}
+
+	result := modifiedDietz(startValue, endValue, actualStart, actualEnd, flows)
+	return &performanceResponseJSON{
+		Range:                 normalizedRange,
+		StartDate:             actualStart.Format("2006-01-02"),
+		EndDate:               actualEnd.Format("2006-01-02"),
+		StartValueCents:       result.StartValueCents,
+		EndValueCents:         result.EndValueCents,
+		NetContributionsCents: result.NetContributionsCents,
+		GainCents:             result.GainCents,
+		ReturnBps:             result.ReturnBps,
+		Method:                result.Method,
+	}, nil
+}
+
+func writePerformanceError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errInvalidPerformanceRange):
+		writeJSONError(w, http.StatusBadRequest, "range must be all, 1y, ytd, 1d, mom, or mtd")
+	case errors.Is(err, errNoPortfolioSnapshots),
+		errors.Is(err, errNoPortfolioValueAtStart),
+		errors.Is(err, errNoPortfolioValueAtEnd):
+		writeJSONError(w, http.StatusNotFound, err.Error())
+	default:
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
 func handleGetPortfolioPerformance(w http.ResponseWriter, r *http.Request, deps apiDependencies) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -416,101 +705,39 @@ func handleGetPortfolioPerformance(w http.ResponseWriter, r *http.Request, deps 
 		rangeParam = "all"
 	}
 
-	loc := GetLocalLocation()
-	now := GetLocalNow()
-	endDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-
-	earliest, err := earliestPerformanceStart(r.Context(), deps.db)
+	resp, err := computePortfolioPerformance(r.Context(), deps.db, rangeParam)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to resolve start date: "+err.Error())
+		writePerformanceError(w, err)
 		return
 	}
-	if earliest.IsZero() {
-		writeJSONError(w, http.StatusNotFound, "no portfolio snapshots available")
-		return
-	}
-	earliest = time.Date(earliest.Year(), earliest.Month(), earliest.Day(), 0, 0, 0, 0, loc)
+	_ = json.NewEncoder(w).Encode(resp)
+}
 
-	var startDate time.Time
-	switch rangeParam {
-	case "ytd":
-		startDate = time.Date(now.Year(), 1, 1, 0, 0, 0, 0, loc)
-		if startDate.Before(earliest) {
-			startDate = earliest
-		}
-	case "1y", "1year", "year":
-		rangeParam = "1y"
-		startDate = endDate.AddDate(-1, 0, 0)
-		if startDate.Before(earliest) {
-			startDate = earliest
-		}
-	case "all":
-		startDate = earliest
-	default:
-		writeJSONError(w, http.StatusBadRequest, "range must be all, 1y, or ytd")
+func handleGetPortfolioPerformanceSummary(w http.ResponseWriter, r *http.Request, deps apiDependencies) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if deps.db == nil {
+		writeJSONError(w, http.StatusInternalServerError, "database not configured")
+		return
+	}
+	if userID, ok := serverauth.UserIDFromContext(r.Context()); !ok || userID == "" {
+		writeJSONError(w, http.StatusUnauthorized, "missing authenticated user")
 		return
 	}
 
-	startValue, actualStart, err := resolvePortfolioValueCents(r.Context(), deps.db, startDate)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to resolve start value: "+err.Error())
-		return
+	resp := performanceSummaryJSON{}
+	if dayOverDay, err := computePortfolioPerformance(r.Context(), deps.db, "1d"); err == nil {
+		resp.DayOverDay = dayOverDay
 	}
-	// If the chosen start still has no resolvable value, fall back to earliest snapshot date.
-	if actualStart.IsZero() && !startDate.Equal(earliest) {
-		startValue, actualStart, err = resolvePortfolioValueCents(r.Context(), deps.db, earliest)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to resolve start value: "+err.Error())
-			return
-		}
-	}
-	if actualStart.IsZero() {
-		writeJSONError(w, http.StatusNotFound, "no portfolio value at start of range")
-		return
+	if monthOverMonth, err := computePortfolioPerformance(r.Context(), deps.db, "mom"); err == nil {
+		resp.MonthOverMonth = monthOverMonth
 	}
 
-	endValue, actualEnd, err := resolvePortfolioValueCents(r.Context(), deps.db, endDate)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to resolve end value: "+err.Error())
+	if resp.DayOverDay == nil && resp.MonthOverMonth == nil {
+		writeJSONError(w, http.StatusNotFound, "not enough snapshot or investment-transaction data yet")
 		return
 	}
-	if actualEnd.IsZero() {
-		// Fall back to latest holdings sum if no snapshot for today.
-		endValue, err = currentHoldingsTotalCents(r.Context(), deps.db)
-		if err != nil || endValue == 0 {
-			writeJSONError(w, http.StatusNotFound, "no portfolio value at end of range")
-			return
-		}
-		actualEnd = endDate
-	}
-
-	txns, err := deps.db.ListInvestmentTransactions(r.Context(), actualStart, actualEnd)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to list investment transactions: "+err.Error())
-		return
-	}
-
-	flows := make([]cashFlow, 0)
-	for _, t := range txns {
-		contrib, ok := classifyExternalCashFlow(t.Type, t.Subtype, t.AmountCents)
-		if !ok || contrib == 0 {
-			continue
-		}
-		flows = append(flows, cashFlow{Date: t.Date.Time, Amount: contrib})
-	}
-
-	result := modifiedDietz(startValue, endValue, actualStart, actualEnd, flows)
-	_ = json.NewEncoder(w).Encode(performanceResponseJSON{
-		Range:                 rangeParam,
-		StartDate:             actualStart.Format("2006-01-02"),
-		EndDate:               actualEnd.Format("2006-01-02"),
-		StartValueCents:       result.StartValueCents,
-		EndValueCents:         result.EndValueCents,
-		NetContributionsCents: result.NetContributionsCents,
-		GainCents:             result.GainCents,
-		ReturnBps:             result.ReturnBps,
-		Method:                result.Method,
-	})
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func currentHoldingsTotalCents(ctx context.Context, db *database.Client) (int64, error) {

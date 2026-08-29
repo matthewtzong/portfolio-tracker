@@ -109,6 +109,15 @@ func registerPortfolioRoutes(mux *http.ServeMux, deps apiDependencies) {
 		handleGetYearlyPortfolioSummary(w, r, deps)
 	})))
 
+	// GET /api/portfolio/performance/summary returns Dietz day-over-day and month-over-month gain.
+	mux.Handle("/api/portfolio/performance/summary", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		handleGetPortfolioPerformanceSummary(w, r, deps)
+	})))
+
 	// GET /api/portfolio/performance returns contribution-adjusted return (Modified Dietz).
 	mux.Handle("/api/portfolio/performance", serverauth.JWTAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
