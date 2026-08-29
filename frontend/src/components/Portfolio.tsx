@@ -572,18 +572,12 @@ export function Portfolio() {
             No holdings. Connect an account to see positions.
           </p>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div className="relative flex flex-col min-h-[7rem]">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-stretch">
+            <div>
               <p className="text-zinc-400 text-sm font-medium mb-1">Portfolio value today</p>
               <p className="text-5xl font-bold text-white tracking-tighter">
                 {formatCurrency(totalPortfolioValue)}
               </p>
-              <div className="mt-auto self-end pt-3">
-                <div className="bg-primary/10 border border-primary/20 rounded-full px-3 py-1 flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-                  <span className="text-xs font-bold text-primary">Today&apos;s Value</span>
-                </div>
-              </div>
             </div>
             <div>
               <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">
@@ -610,7 +604,7 @@ export function Portfolio() {
                 </>
               )}
             </div>
-            <div>
+            <div className="relative h-full min-h-[7rem] pb-11">
               <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">
                 Month over month
               </p>
@@ -634,6 +628,12 @@ export function Portfolio() {
                   )}
                 </>
               )}
+              <div className="absolute bottom-0 right-0">
+                <div className="bg-primary/10 border border-primary/20 rounded-full px-3 py-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                  <span className="text-xs font-bold text-primary">Today&apos;s Value</span>
+                </div>
+              </div>
             </div>
           </div>
         )}

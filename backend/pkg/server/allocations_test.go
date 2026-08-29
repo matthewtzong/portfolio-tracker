@@ -3,29 +3,10 @@ package server
 import (
 	"strings"
 	"testing"
-)
+	"time"
 
-func TestDietzToOverviewDelta(t *testing.T) {
-	bps := int64(150)
-	delta := dietzToOverviewDelta(&performanceResponseJSON{
-		StartDate:   "2026-08-27",
-		EndDate:     "2026-08-28",
-		GainCents:   50000,
-		ReturnBps:   bps,
-	})
-	if delta == nil {
-		t.Fatal("expected delta")
-	}
-	if delta.AbsoluteCents != 50000 {
-		t.Fatalf("gain=%d, want 50000", delta.AbsoluteCents)
-	}
-	if delta.PercentBps == nil || *delta.PercentBps != 150 {
-		t.Fatalf("return bps=%v, want 150", delta.PercentBps)
-	}
-	if delta.FromDate != "2026-08-27" || delta.ToDate != "2026-08-28" {
-		t.Fatalf("dates=%s→%s", delta.FromDate, delta.ToDate)
-	}
-}
+	"github.com/matthewtzong/portfolio-tracker/backend/pkg/database"
+)
 
 func TestMapPlaidTypeToAssetClass(t *testing.T) {
 	tests := []struct {
@@ -79,9 +60,9 @@ func TestAggregateHoldingsBySymbolAcrossAccounts(t *testing.T) {
 
 func TestBuildPortfolioOverviewExcludesCashAndAllowsOneOverCap(t *testing.T) {
 	classBySymbol := map[string]string{
-		"VOO":  assetClassETF,
-		"GOOG": assetClassStock,
-		"AAPL": assetClassStock,
+		"VOO":   assetClassETF,
+		"GOOG":  assetClassStock,
+		"AAPL":  assetClassStock,
 		"SPAXX": assetClassCash,
 	}
 	current := []overviewHoldingInput{
@@ -95,13 +76,23 @@ func TestBuildPortfolioOverviewExcludesCashAndAllowsOneOverCap(t *testing.T) {
 		{AccountID: "a1", AccountName: "B", Symbol: "GOOG", Quantity: 1, ValueCents: 290000},
 		{AccountID: "a1", AccountName: "B", Symbol: "AAPL", Quantity: 1, ValueCents: 210000},
 	}
+	day1 := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+	snapshots := []database.DailySnapshot{
+		{Date: database.DateOnly{Time: day1}, PortfolioValueCents: 980000},
+		{Date: database.DateOnly{Time: day2}, PortfolioValueCents: 1000000},
+	}
+	monthly := []SnapshotDataPoint{
+		{Date: "2026-07-01", PortfolioValueCents: 900000},
+		{Date: "2026-08-01", PortfolioValueCents: 1000000},
+	}
 	targets := []overviewTargetInput{
 		{Kind: targetKindTicker, Key: "VOO", TargetBps: 5000},
 		{Kind: targetKindAssetClass, Key: "stock", TargetBps: 5000},
 	}
 	settings := overviewSettingsInput{DriftWarnBps: 500, SingleStockMaxBps: 1000}
 
-	resp := buildPortfolioOverview(current, prior, prior, classBySymbol, targets, settings)
+	resp := buildPortfolioOverview(current, prior, prior, classBySymbol, snapshots, monthly, targets, settings)
 
 	if resp.TotalValueCents != 1000000 {
 		t.Fatalf("expected invested 1000000 (ex-cash), got %d", resp.TotalValueCents)
@@ -110,6 +101,12 @@ func TestBuildPortfolioOverviewExcludesCashAndAllowsOneOverCap(t *testing.T) {
 		if s.Symbol == "SPAXX" {
 			t.Fatal("SPAXX should be excluded from bySymbol")
 		}
+	}
+	if resp.DayOverDay == nil || resp.DayOverDay.AbsoluteCents != 20000 {
+		t.Fatalf("unexpected DoD: %+v", resp.DayOverDay)
+	}
+	if resp.MonthOverMonth == nil || resp.MonthOverMonth.AbsoluteCents != 100000 {
+		t.Fatalf("unexpected MoM: %+v", resp.MonthOverMonth)
 	}
 
 	// GOOG ~30% and AAPL ~20% over 10% — only AAPL should warn (GOOG is exempt).
@@ -135,7 +132,7 @@ func TestBuildPortfolioOverviewExcludesCashAndAllowsOneOverCap(t *testing.T) {
 		{AccountID: "a1", AccountName: "B", Symbol: "GOOG", Quantity: 1, ValueCents: 150000},
 		{AccountID: "a1", AccountName: "B", Symbol: "AAPL", Quantity: 1, ValueCents: 50000},
 	}
-	resp2 := buildPortfolioOverview(currentOne, prior, prior, classBySymbol, nil, settings)
+	resp2 := buildPortfolioOverview(currentOne, prior, prior, classBySymbol, snapshots, monthly, nil, settings)
 	for _, w := range resp2.Warnings {
 		if w.Type == "single_name_cap" || w.Type == "concentration" {
 			t.Fatalf("GOOG-only over cap should not warn; got %+v", w)
@@ -153,7 +150,7 @@ func TestBuildPortfolioOverviewExcludesCashAndAllowsOneOverCap(t *testing.T) {
 		"AVGO": assetClassStock,
 		"AAPL": assetClassStock,
 	}
-	resp3 := buildPortfolioOverview(currentAVGO, prior, prior, classAVGO, nil, settings)
+	resp3 := buildPortfolioOverview(currentAVGO, prior, prior, classAVGO, snapshots, monthly, nil, settings)
 	foundAVGO := false
 	for _, w := range resp3.Warnings {
 		if w.Type == "single_name_cap" && strings.Contains(w.Message, "AVGO") {
@@ -243,7 +240,7 @@ func TestComputeMoversSkipsCashAndNewPositions(t *testing.T) {
 
 func TestComputeMoversSortsByPercent(t *testing.T) {
 	classBySymbol := map[string]string{
-		"VOO":  assetClassETF,
+		"VOO":   assetClassETF,
 		"SMALL": assetClassStock,
 	}
 	prior := []overviewHoldingInput{

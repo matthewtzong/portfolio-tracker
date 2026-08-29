@@ -174,6 +174,8 @@ func buildPortfolioOverview(
 	priorDay []overviewHoldingInput,
 	oldestDay []overviewHoldingInput,
 	classBySymbol map[string]string,
+	dailySnapshots []database.DailySnapshot,
+	monthlyTotals []SnapshotDataPoint,
 	targets []overviewTargetInput,
 	settings overviewSettingsInput,
 ) portfolioOverviewResponse {
@@ -223,6 +225,9 @@ func buildPortfolioOverview(
 		DriftWarnBps:      settings.DriftWarnBps,
 		SingleStockMaxBps: settings.SingleStockMaxBps,
 	}
+
+	resp.DayOverDay = deltaFromSnapshots(dailySnapshots)
+	resp.MonthOverMonth = deltaFromMonthlyPoints(monthlyTotals)
 
 	_ = oldestDay
 
@@ -440,18 +445,43 @@ func matchTargetBuckets(
 	return buckets, actualBps
 }
 
-// Maps Modified Dietz performance to the allocations overview delta shape (gain $ + return %).
-func dietzToOverviewDelta(perf *performanceResponseJSON) *overviewDeltaJSON {
-	if perf == nil {
+func deltaFromSnapshots(snapshots []database.DailySnapshot) *overviewDeltaJSON {
+	if len(snapshots) < 2 {
 		return nil
 	}
-	bps := int(perf.ReturnBps)
-	return &overviewDeltaJSON{
-		AbsoluteCents: perf.GainCents,
-		PercentBps:    &bps,
-		FromDate:      perf.StartDate,
-		ToDate:        perf.EndDate,
+	sorted := make([]database.DailySnapshot, len(snapshots))
+	copy(sorted, snapshots)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Date.Time.Before(sorted[j].Date.Time)
+	})
+	from := sorted[len(sorted)-2]
+	to := sorted[len(sorted)-1]
+	return makeDelta(from.PortfolioValueCents, to.PortfolioValueCents, from.Date.Format(dateLayout), to.Date.Format(dateLayout))
+}
+
+func deltaFromMonthlyPoints(points []SnapshotDataPoint) *overviewDeltaJSON {
+	if len(points) < 2 {
+		return nil
 	}
+	sorted := make([]SnapshotDataPoint, len(points))
+	copy(sorted, points)
+	sortSnapshotDataPoints(sorted)
+	from := sorted[len(sorted)-2]
+	to := sorted[len(sorted)-1]
+	return makeDelta(from.PortfolioValueCents, to.PortfolioValueCents, from.Date, to.Date)
+}
+
+func makeDelta(fromCents, toCents int64, fromDate, toDate string) *overviewDeltaJSON {
+	delta := &overviewDeltaJSON{
+		AbsoluteCents: toCents - fromCents,
+		FromDate:      fromDate,
+		ToDate:        toDate,
+	}
+	if fromCents != 0 {
+		bps := int(math.Round(float64(toCents-fromCents) * 10000.0 / float64(fromCents)))
+		delta.PercentBps = &bps
+	}
+	return delta
 }
 
 func sumHoldingsBySymbol(holdings []overviewHoldingInput, classBySymbol map[string]string) map[string]int64 {
@@ -777,6 +807,59 @@ func handleGetPortfolioOverview(w http.ResponseWriter, r *http.Request, deps api
 		classBySymbol[strings.ToUpper(s.Symbol)] = s.AssetClass
 	}
 
+	dailySnapshots, err := deps.db.ListDailySnapshots(r.Context(), dailyStart, dayStart)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to list daily snapshots: "+err.Error())
+		return
+	}
+
+	monthlyStart := time.Date(now.Year()-2, 1, 1, 0, 0, 0, 0, GetLocalLocation())
+	allMonthly, err := deps.db.ListMonthlySnapshots(r.Context(), monthlyStart, dayStart)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to list monthly snapshots: "+err.Error())
+		return
+	}
+	monthlySum := make(map[string]int64)
+	for _, snapshot := range allMonthly {
+		month := snapshot.Month.Format(dateLayout)
+		monthlySum[month] += snapshot.PortfolioValueCents
+	}
+	monthlyPoints := make([]SnapshotDataPoint, 0, len(monthlySum))
+	for month, sum := range monthlySum {
+		monthlyPoints = append(monthlyPoints, SnapshotDataPoint{
+			Date:                month,
+			PortfolioValueCents: sum,
+		})
+	}
+	sortSnapshotDataPoints(monthlyPoints)
+	// Append current month from latest daily snapshot if missing.
+	if len(dailySnapshots) > 0 {
+		latestDaily := dailySnapshots[0]
+		for _, s := range dailySnapshots {
+			if s.Date.Time.After(latestDaily.Date.Time) {
+				latestDaily = s
+			}
+		}
+		// Use the latest daily's real date (not the 1st of the month) so MoM shows
+		// e.g. Jul 31 → Aug 22 instead of Jul 31 → Aug 1.
+		latestDailyDate := latestDaily.Date.Format(dateLayout)
+		currentMonthPrefix := latestDailyDate[:7]
+		hasCurrent := false
+		for _, p := range monthlyPoints {
+			if len(p.Date) >= 7 && p.Date[:7] == currentMonthPrefix {
+				hasCurrent = true
+				break
+			}
+		}
+		if !hasCurrent {
+			monthlyPoints = append(monthlyPoints, SnapshotDataPoint{
+				Date:                latestDailyDate,
+				PortfolioValueCents: latestDaily.PortfolioValueCents,
+			})
+			sortSnapshotDataPoints(monthlyPoints)
+		}
+	}
+
 	dbTargets, err := deps.db.ListAllocationTargets(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to list targets: "+err.Error())
@@ -805,13 +888,7 @@ func handleGetPortfolioOverview(w http.ResponseWriter, r *http.Request, deps api
 		settings.SingleStockMaxBps = dbSettings.SingleStockMaxBps
 	}
 
-	resp := buildPortfolioOverview(current, prior, oldest, classBySymbol, targets, settings)
-	if dayPerf, err := computePortfolioPerformance(r.Context(), deps.db, "1d"); err == nil {
-		resp.DayOverDay = dietzToOverviewDelta(dayPerf)
-	}
-	if momPerf, err := computePortfolioPerformance(r.Context(), deps.db, "mom"); err == nil {
-		resp.MonthOverMonth = dietzToOverviewDelta(momPerf)
-	}
+	resp := buildPortfolioOverview(current, prior, oldest, classBySymbol, dailySnapshots, monthlyPoints, targets, settings)
 	if len(dates) >= 2 {
 		latest := dates[len(dates)-1]
 		priorDate := dates[len(dates)-2]
