@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -25,6 +26,7 @@ const (
 
 	targetKindTicker     = "ticker"
 	targetKindAssetClass = "asset_class"
+	targetKindGroup      = "group"
 
 	defaultDriftWarnBps      = 500
 	defaultSingleStockMaxBps = 1000
@@ -82,6 +84,7 @@ type overviewTargetInput struct {
 	Kind      string
 	Key       string
 	TargetBps int
+	Members   []string // for kind=group: tickers rolled into this bucket
 }
 
 // Settings for warning thresholds.
@@ -349,37 +352,80 @@ func matchTargetBuckets(
 ) ([]overviewBucketJSON, map[string]int) {
 	tickerTargets := make(map[string]int)
 	classTargets := make(map[string]int)
+	type groupTarget struct {
+		key       string
+		targetBps int
+		members   []string
+	}
+	groupTargets := make([]groupTarget, 0)
 	for _, t := range targets {
-		key := strings.ToUpper(strings.TrimSpace(t.Key))
-		if t.Kind == targetKindTicker {
-			tickerTargets[key] = t.TargetBps
-		} else if t.Kind == targetKindAssetClass {
-			classTargets[strings.ToLower(strings.TrimSpace(t.Key))] = t.TargetBps
+		key := strings.TrimSpace(t.Key)
+		switch t.Kind {
+		case targetKindTicker:
+			tickerTargets[strings.ToUpper(key)] = t.TargetBps
+		case targetKindAssetClass:
+			classTargets[strings.ToLower(key)] = t.TargetBps
+		case targetKindGroup:
+			members := normalizeGroupMembers(t.Members)
+			if key == "" || len(members) == 0 {
+				continue
+			}
+			groupTargets = append(groupTargets, groupTarget{
+				key:       key,
+				targetBps: t.TargetBps,
+				members:   members,
+			})
 		}
 	}
+	sort.Slice(groupTargets, func(i, j int) bool {
+		return groupTargets[i].key < groupTargets[j].key
+	})
 
 	consumed := make(map[string]bool)
 	actualBps := make(map[string]int)
 	buckets := make([]overviewBucketJSON, 0)
-
-	// Named ticker targets first.
-	tickerKeys := make([]string, 0, len(tickerTargets))
-	for k := range tickerTargets {
-		tickerKeys = append(tickerKeys, k)
-	}
-	sort.Strings(tickerKeys)
 
 	valueBySymbol := make(map[string]overviewSymbolJSON)
 	for _, s := range symbols {
 		valueBySymbol[s.Symbol] = s
 	}
 
+	// Named groups first (aggregate member tickers into one bucket).
+	for _, g := range groupTargets {
+		value := int64(0)
+		for _, symbol := range g.members {
+			if s, ok := valueBySymbol[symbol]; ok {
+				value += s.ValueCents
+				consumed[symbol] = true
+			}
+		}
+		bps := weightBps(value, invested)
+		actualBps["group:"+g.key] = bps
+		tb := g.targetBps
+		buckets = append(buckets, overviewBucketJSON{
+			Key:        g.key,
+			Label:      g.key,
+			ValueCents: value,
+			WeightBps:  bps,
+			TargetBps:  &tb,
+		})
+	}
+
+	// Named ticker targets next (skip if already consumed by a group).
+	tickerKeys := make([]string, 0, len(tickerTargets))
+	for k := range tickerTargets {
+		tickerKeys = append(tickerKeys, k)
+	}
+	sort.Strings(tickerKeys)
+
 	for _, key := range tickerKeys {
 		target := tickerTargets[key]
 		value := int64(0)
-		if s, ok := valueBySymbol[key]; ok {
-			value = s.ValueCents
-			consumed[key] = true
+		if !consumed[key] {
+			if s, ok := valueBySymbol[key]; ok {
+				value = s.ValueCents
+				consumed[key] = true
+			}
 		}
 		bps := weightBps(value, invested)
 		actualBps["ticker:"+key] = bps
@@ -438,6 +484,25 @@ func matchTargetBuckets(
 		return aggregateByAssetClass(symbols, invested), actualBps
 	}
 	return buckets, actualBps
+}
+
+// Normalizes group member tickers to unique uppercase symbols.
+// Accepts already-split symbols or comma/whitespace-separated tokens.
+func normalizeGroupMembers(members []string) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0, len(members))
+	for _, m := range members {
+		for _, part := range splitMemberTokens(m) {
+			sym := strings.ToUpper(strings.TrimSpace(part))
+			if sym == "" || seen[sym] {
+				continue
+			}
+			seen[sym] = true
+			out = append(out, sym)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Maps Modified Dietz performance to the allocations overview delta shape (gain $ + return %).
@@ -596,10 +661,14 @@ func buildWarnings(
 	for _, t := range targets {
 		var key string
 		var label string
-		if t.Kind == targetKindTicker {
+		switch t.Kind {
+		case targetKindTicker:
 			key = "ticker:" + strings.ToUpper(t.Key)
 			label = strings.ToUpper(t.Key)
-		} else {
+		case targetKindGroup:
+			key = "group:" + strings.TrimSpace(t.Key)
+			label = strings.TrimSpace(t.Key)
+		default:
 			class := strings.ToLower(t.Key)
 			key = "asset_class:" + class
 			label = assetClassDisplayLabel(class)
@@ -788,6 +857,7 @@ func handleGetPortfolioOverview(w http.ResponseWriter, r *http.Request, deps api
 			Kind:      t.Kind,
 			Key:       t.Key,
 			TargetBps: t.TargetBps,
+			Members:   t.Members,
 		})
 	}
 
@@ -866,9 +936,51 @@ type allocationTargetsResponse struct {
 }
 
 type allocationTargetJSON struct {
-	Kind      string `json:"kind"`
-	Key       string `json:"key"`
-	TargetBps int    `json:"targetBps"`
+	Kind      string              `json:"kind"`
+	Key       string              `json:"key"`
+	TargetBps int                 `json:"targetBps"`
+	Members   flexibleStringList  `json:"members,omitempty"`
+}
+
+// flexibleStringList accepts JSON ["VOO","FXAIX"] or "VOO, FXAIX".
+type flexibleStringList []string
+
+func (l *flexibleStringList) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*l = nil
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*l = splitMemberTokens(s)
+		return nil
+	}
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err != nil {
+		return err
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		out = append(out, splitMemberTokens(item)...)
+	}
+	*l = out
+	return nil
+}
+
+func splitMemberTokens(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 type putAllocationTargetsRequest struct {
@@ -907,7 +1019,12 @@ func handleGetAllocationTargets(w http.ResponseWriter, r *http.Request, deps api
 	targets := make([]allocationTargetJSON, 0, len(dbTargets))
 	sum := 0
 	for _, t := range dbTargets {
-		targets = append(targets, allocationTargetJSON{Kind: t.Kind, Key: t.Key, TargetBps: t.TargetBps})
+		targets = append(targets, allocationTargetJSON{
+			Kind:      t.Kind,
+			Key:       t.Key,
+			TargetBps: t.TargetBps,
+			Members:   flexibleStringList(t.Members),
+		})
 		sum += t.TargetBps
 	}
 	_ = json.NewEncoder(w).Encode(allocationTargetsResponse{
@@ -937,13 +1054,14 @@ func handlePutAllocationTargets(w http.ResponseWriter, r *http.Request, deps api
 	}
 
 	seen := make(map[string]bool)
+	seenSymbols := make(map[string]string) // symbol -> "ticker:KEY" or "group:KEY"
 	dbRows := make([]database.AllocationTarget, 0, len(req.Targets))
 	sum := 0
 	for _, t := range req.Targets {
 		kind := strings.TrimSpace(t.Kind)
 		key := strings.TrimSpace(t.Key)
-		if kind != targetKindTicker && kind != targetKindAssetClass {
-			writeJSONError(w, http.StatusBadRequest, "kind must be ticker or asset_class")
+		if kind != targetKindTicker && kind != targetKindAssetClass && kind != targetKindGroup {
+			writeJSONError(w, http.StatusBadRequest, "kind must be ticker, asset_class, or group")
 			return
 		}
 		if key == "" {
@@ -954,15 +1072,37 @@ func handlePutAllocationTargets(w http.ResponseWriter, r *http.Request, deps api
 			writeJSONError(w, http.StatusBadRequest, "targetBps must be between 0 and 10000")
 			return
 		}
-		if kind == targetKindTicker {
+
+		var members []string
+		switch kind {
+		case targetKindTicker:
 			key = strings.ToUpper(key)
-		} else {
+			if prev, ok := seenSymbols[key]; ok {
+				writeJSONError(w, http.StatusBadRequest, "symbol "+key+" already used by "+prev)
+				return
+			}
+			seenSymbols[key] = "ticker:"+key
+		case targetKindAssetClass:
 			key = strings.ToLower(key)
 			if key != assetClassETF && key != assetClassStock && key != assetClassOther {
 				writeJSONError(w, http.StatusBadRequest, "asset_class key must be etf, stock, or other")
 				return
 			}
+		case targetKindGroup:
+			members = normalizeGroupMembers([]string(t.Members))
+			if len(members) < 2 {
+				writeJSONError(w, http.StatusBadRequest, "group requires at least 2 tickers")
+				return
+			}
+			for _, sym := range members {
+				if prev, ok := seenSymbols[sym]; ok {
+					writeJSONError(w, http.StatusBadRequest, "symbol "+sym+" already used by "+prev)
+					return
+				}
+				seenSymbols[sym] = "group:"+key
+			}
 		}
+
 		uniq := kind + ":" + key
 		if seen[uniq] {
 			writeJSONError(w, http.StatusBadRequest, "duplicate target: "+uniq)
@@ -970,11 +1110,17 @@ func handlePutAllocationTargets(w http.ResponseWriter, r *http.Request, deps api
 		}
 		seen[uniq] = true
 		sum += t.TargetBps
-		dbRows = append(dbRows, database.AllocationTarget{
+		row := database.AllocationTarget{
 			Kind:      kind,
 			Key:       key,
 			TargetBps: t.TargetBps,
-		})
+		}
+		if kind == targetKindGroup {
+			row.Members = members
+		} else {
+			row.Members = []string{}
+		}
+		dbRows = append(dbRows, row)
 	}
 	if sum > 10000 {
 		writeJSONError(w, http.StatusBadRequest, "targets sum cannot exceed 100%")
@@ -1012,7 +1158,12 @@ func handlePutAllocationTargets(w http.ResponseWriter, r *http.Request, deps api
 
 	out := make([]allocationTargetJSON, 0, len(dbRows))
 	for _, t := range dbRows {
-		out = append(out, allocationTargetJSON{Kind: t.Kind, Key: t.Key, TargetBps: t.TargetBps})
+		out = append(out, allocationTargetJSON{
+			Kind:      t.Kind,
+			Key:       t.Key,
+			TargetBps: t.TargetBps,
+			Members:   flexibleStringList(t.Members),
+		})
 	}
 	_ = json.NewEncoder(w).Encode(allocationTargetsResponse{
 		Targets:           out,

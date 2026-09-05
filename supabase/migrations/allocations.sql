@@ -9,9 +9,10 @@ CREATE TABLE IF NOT EXISTS securities (
 
 CREATE TABLE IF NOT EXISTS allocation_targets (
   id BIGSERIAL PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('ticker', 'asset_class')),
+  kind TEXT NOT NULL CHECK (kind IN ('ticker', 'asset_class', 'group')),
   key TEXT NOT NULL,
   target_bps INT NOT NULL CHECK (target_bps >= 0 AND target_bps <= 10000),
+  members TEXT[] NOT NULL DEFAULT '{}',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (kind, key)
 );

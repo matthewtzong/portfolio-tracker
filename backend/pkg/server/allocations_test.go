@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -215,6 +216,94 @@ func TestTargetMatchingConsumesTickerThenClass(t *testing.T) {
 	}
 	if actual["asset_class:stock"] != 3000 {
 		t.Fatalf("stock leftover bps = %d", actual["asset_class:stock"])
+	}
+}
+
+func TestTargetMatchingAggregatesGroupMembers(t *testing.T) {
+	symbols := []overviewSymbolJSON{
+		{Symbol: "VOO", AssetClass: assetClassETF, ValueCents: 400000},
+		{Symbol: "FXAIX", AssetClass: assetClassETF, ValueCents: 300000},
+		{Symbol: "QQQ", AssetClass: assetClassETF, ValueCents: 100000},
+		{Symbol: "AAPL", AssetClass: assetClassStock, ValueCents: 200000},
+	}
+	targets := []overviewTargetInput{
+		{
+			Kind:      targetKindGroup,
+			Key:       "S&P 500",
+			TargetBps: 7000,
+			Members:   []string{"voo", "FXAIX"},
+		},
+		{Kind: targetKindAssetClass, Key: "etf", TargetBps: 1000},
+		{Kind: targetKindAssetClass, Key: "stock", TargetBps: 2000},
+	}
+	buckets, actual := matchTargetBuckets(symbols, 1000000, targets)
+	if actual["group:S&P 500"] != 7000 {
+		t.Fatalf("S&P 500 weight bps = %d, want 7000", actual["group:S&P 500"])
+	}
+	if actual["asset_class:etf"] != 1000 {
+		t.Fatalf("other ETF leftover bps = %d, want 1000 (QQQ only)", actual["asset_class:etf"])
+	}
+	if actual["asset_class:stock"] != 2000 {
+		t.Fatalf("stock leftover bps = %d", actual["asset_class:stock"])
+	}
+	found := false
+	for _, b := range buckets {
+		if b.Key == "S&P 500" {
+			found = true
+			if b.ValueCents != 700000 {
+				t.Fatalf("S&P 500 value = %d, want 700000", b.ValueCents)
+			}
+			if b.Label != "S&P 500" {
+				t.Fatalf("label = %q", b.Label)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected S&P 500 bucket, got %+v", buckets)
+	}
+}
+
+func TestNormalizeGroupMembers(t *testing.T) {
+	got := normalizeGroupMembers([]string{" voo ", "FXAIX", "VOO", "", "spy"})
+	want := []string{"FXAIX", "SPY", "VOO"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+
+	gotCSV := normalizeGroupMembers([]string{"VOO, FXAIX, spy"})
+	if len(gotCSV) != 3 || gotCSV[0] != "FXAIX" || gotCSV[1] != "SPY" || gotCSV[2] != "VOO" {
+		t.Fatalf("csv normalize got %v", gotCSV)
+	}
+
+	// Spaces alone must not split — only commas.
+	gotSpaces := normalizeGroupMembers([]string{"VOO FXAIX"})
+	if len(gotSpaces) != 1 || gotSpaces[0] != "VOO FXAIX" {
+		t.Fatalf("space-only should stay one token, got %v", gotSpaces)
+	}
+}
+
+func TestFlexibleStringListUnmarshal(t *testing.T) {
+	var fromArray flexibleStringList
+	if err := json.Unmarshal([]byte(`["voo"," FXAIX "]`), &fromArray); err != nil {
+		t.Fatal(err)
+	}
+	got := normalizeGroupMembers([]string(fromArray))
+	if len(got) != 2 || got[0] != "FXAIX" || got[1] != "VOO" {
+		t.Fatalf("array form got %v", got)
+	}
+
+	var fromCSV flexibleStringList
+	if err := json.Unmarshal([]byte(`"VOO, FXAIX, spy"`), &fromCSV); err != nil {
+		t.Fatal(err)
+	}
+	got = normalizeGroupMembers([]string(fromCSV))
+	if len(got) != 3 {
+		t.Fatalf("csv form got %v", got)
 	}
 }
 

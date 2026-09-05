@@ -1710,6 +1710,7 @@ type AllocationTarget struct {
 	Kind      string     `json:"kind"`
 	Key       string     `json:"key"`
 	TargetBps int        `json:"target_bps"`
+	Members   []string   `json:"members"` // always present so PostgREST batch keys match
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
 
@@ -1842,6 +1843,12 @@ func (c *Client) DeleteAllAllocationTargets(ctx context.Context) error {
 func (c *Client) InsertAllocationTargets(ctx context.Context, targets []AllocationTarget) error {
 	if len(targets) == 0 {
 		return nil
+	}
+	// Ensure every row has the same JSON shape (PostgREST PGRST102) and non-null members.
+	for i := range targets {
+		if targets[i].Members == nil {
+			targets[i].Members = []string{}
+		}
 	}
 	url := c.restURL("allocation_targets")
 	resp, err := c.doRequest(ctx, http.MethodPost, url, targets)

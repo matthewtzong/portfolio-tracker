@@ -73,9 +73,10 @@ interface PortfolioOverview {
 }
 
 interface AllocationTarget {
-  kind: 'ticker' | 'asset_class'
+  kind: 'ticker' | 'asset_class' | 'group'
   key: string
   targetBps: number
+  members?: string[]
 }
 
 interface TargetsResponse {
@@ -154,8 +155,9 @@ export function Allocations() {
   const [saving, setSaving] = useState(false)
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
 
-  const [newKind, setNewKind] = useState<'ticker' | 'asset_class'>('ticker')
+  const [newKind, setNewKind] = useState<'ticker' | 'asset_class' | 'group'>('ticker')
   const [newKey, setNewKey] = useState('')
+  const [newMembers, setNewMembers] = useState('')
   const [newPercent, setNewPercent] = useState('')
 
   const loadOverview = useCallback(async () => {
@@ -210,13 +212,41 @@ export function Allocations() {
   }
 
   const handleAddTarget = () => {
-    const key = newKind === 'ticker' ? newKey.trim().toUpperCase() : newKey.trim().toLowerCase()
     const pct = Number(newPercent)
-    if (!key || Number.isNaN(pct) || pct < 0 || pct > 100) {
-      setSaveMessage('Enter a valid key and percent (0–100)')
+    if (Number.isNaN(pct) || pct < 0 || pct > 100) {
+      setSaveMessage('Enter a valid percent (0–100)')
       return
     }
     const targetBps = Math.round(pct * 100)
+
+    if (newKind === 'group') {
+      const key = newKey.trim()
+      const members = newMembers
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => s.toUpperCase())
+      const uniqueMembers = [...new Set(members)]
+      if (!key || uniqueMembers.length < 2) {
+        setSaveMessage('Group needs a name and at least 2 tickers (comma-separated)')
+        return
+      }
+      const withoutDup = targets.filter((t) => !(t.kind === 'group' && t.key === key))
+      void saveTargets([
+        ...withoutDup,
+        { kind: 'group', key, targetBps, members: uniqueMembers },
+      ])
+      setNewKey('')
+      setNewMembers('')
+      setNewPercent('')
+      return
+    }
+
+    const key = newKind === 'ticker' ? newKey.trim().toUpperCase() : newKey.trim().toLowerCase()
+    if (!key) {
+      setSaveMessage('Enter a valid key and percent (0–100)')
+      return
+    }
     const withoutDup = targets.filter((t) => !(t.kind === newKind && t.key === key))
     void saveTargets([...withoutDup, { kind: newKind, key, targetBps }])
     setNewKey('')
@@ -329,7 +359,7 @@ export function Allocations() {
         <div className="bg-card border border-border rounded-4xl p-6 sm:p-8 shadow-2xl">
           <h2 className="text-xl font-bold text-white mb-1">Target buckets</h2>
           <p className="text-zinc-500 text-sm font-medium mb-6">
-            Named tickers first; leftovers roll into ETF / stock / other.
+            Named groups and tickers first; leftovers roll into ETF / stock / other.
           </p>
           {loading && !overview ? (
             <div className="h-64 bg-zinc-800 animate-pulse rounded-2xl" />
@@ -376,11 +406,16 @@ export function Allocations() {
                 >
                   <div>
                     <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mr-2">
-                      {t.kind === 'ticker' ? 'Ticker' : 'Class'}
+                      {t.kind === 'ticker' ? 'Ticker' : t.kind === 'group' ? 'Group' : 'Class'}
                     </span>
                     <span className="text-white font-bold">
-                      {t.kind === 'ticker' ? t.key : assetClassLabel(t.key)}
+                      {t.kind === 'asset_class' ? assetClassLabel(t.key) : t.key}
                     </span>
+                    {t.kind === 'group' && t.members && t.members.length > 0 && (
+                      <p className="text-[11px] text-zinc-500 mt-1 font-medium">
+                        {t.members.join(' · ')}
+                      </p>
+                    )}
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-zinc-300 font-medium">
@@ -400,55 +435,74 @@ export function Allocations() {
             )}
           </div>
 
-          <div className="flex flex-col sm:flex-row gap-2 mb-4">
-            <select
-              value={newKind}
-              onChange={(e) => {
-                setNewKind(e.target.value as 'ticker' | 'asset_class')
-                setNewKey('')
-              }}
-              className="bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold"
-            >
-              <option value="ticker">Ticker</option>
-              <option value="asset_class">Asset class</option>
-            </select>
-            {newKind === 'ticker' ? (
-              <input
-                value={newKey}
-                onChange={(e) => setNewKey(e.target.value)}
-                placeholder="VOO"
-                className="flex-1 bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold uppercase"
-              />
-            ) : (
+          <div className="flex flex-col gap-2 mb-4">
+            <div className="flex flex-col sm:flex-row gap-2">
               <select
-                value={newKey}
-                onChange={(e) => setNewKey(e.target.value)}
-                className="flex-1 bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold"
+                value={newKind}
+                onChange={(e) => {
+                  setNewKind(e.target.value as 'ticker' | 'asset_class' | 'group')
+                  setNewKey('')
+                  setNewMembers('')
+                }}
+                className="bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold"
               >
-                <option value="">Select class</option>
-                <option value="etf">Other ETFs</option>
-                <option value="stock">Single stocks</option>
-                <option value="other">Other</option>
+                <option value="ticker">Ticker</option>
+                <option value="group">Group</option>
+                <option value="asset_class">Asset class</option>
               </select>
+              {newKind === 'ticker' ? (
+                <input
+                  value={newKey}
+                  onChange={(e) => setNewKey(e.target.value)}
+                  placeholder="VOO"
+                  className="flex-1 bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold uppercase"
+                />
+              ) : newKind === 'group' ? (
+                <input
+                  value={newKey}
+                  onChange={(e) => setNewKey(e.target.value)}
+                  placeholder="S&P 500"
+                  className="flex-1 bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold"
+                />
+              ) : (
+                <select
+                  value={newKey}
+                  onChange={(e) => setNewKey(e.target.value)}
+                  className="flex-1 bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold"
+                >
+                  <option value="">Select class</option>
+                  <option value="etf">Other ETFs</option>
+                  <option value="stock">Single stocks</option>
+                  <option value="other">Other</option>
+                </select>
+              )}
+              <input
+                value={newPercent}
+                onChange={(e) => setNewPercent(e.target.value)}
+                placeholder="%"
+                type="number"
+                min={0}
+                max={100}
+                step={0.1}
+                className="w-24 bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold"
+              />
+              <button
+                type="button"
+                onClick={handleAddTarget}
+                disabled={saving}
+                className="px-5 py-2 text-xs font-bold rounded-full bg-primary/20 text-primary border border-primary/30 hover:bg-primary/30 disabled:opacity-50"
+              >
+                Add
+              </button>
+            </div>
+            {newKind === 'group' && (
+              <input
+                value={newMembers}
+                onChange={(e) => setNewMembers(e.target.value)}
+                placeholder="Tickers: VOO, FXAIX, SPY"
+                className="w-full bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold uppercase"
+              />
             )}
-            <input
-              value={newPercent}
-              onChange={(e) => setNewPercent(e.target.value)}
-              placeholder="%"
-              type="number"
-              min={0}
-              max={100}
-              step={0.1}
-              className="w-24 bg-zinc-900 border border-border text-zinc-100 rounded-full px-4 py-2 text-xs font-bold"
-            />
-            <button
-              type="button"
-              onClick={handleAddTarget}
-              disabled={saving}
-              className="px-5 py-2 text-xs font-bold rounded-full bg-primary/20 text-primary border border-primary/30 hover:bg-primary/30 disabled:opacity-50"
-            >
-              Add
-            </button>
           </div>
 
           <div className="grid grid-cols-2 gap-3 mb-4">
@@ -536,7 +590,7 @@ export function Allocations() {
       {/* Movers */}
       <div className="space-y-8">
         <div className="space-y-3">
-          <h2 className="text-xl font-bold text-white px-1">Top movers — Last Day</h2>
+          <h2 className="text-xl font-bold text-white px-1">Top Movers — Last Day</h2>
           <p className="text-zinc-500 text-sm font-medium px-1">
             {formatMoversPeriodLabel(
               overview?.moversDay?.fromDate,
@@ -551,7 +605,7 @@ export function Allocations() {
         </div>
 
         <div className="space-y-3">
-          <h2 className="text-xl font-bold text-white px-1">Top movers — Last Week</h2>
+          <h2 className="text-xl font-bold text-white px-1">Top Movers — Last Week</h2>
           <p className="text-zinc-500 text-sm font-medium px-1">
             {formatMoversPeriodLabel(
               overview?.moversWeek?.fromDate,
@@ -588,14 +642,20 @@ function MoversCard({
           {movers.map((m) => (
             <li
               key={m.symbol}
-              className="flex justify-between items-center border-b border-border/50 pb-3"
+              className="grid grid-cols-[1fr_5.5rem_0.5rem_6.5rem] items-center border-b border-border/50 pb-3"
             >
-              <span className="font-bold text-white">{m.symbol}</span>
-              <span className={`font-bold text-sm ${positive ? 'text-green-400' : 'text-red-400'}`}>
+              <span className="font-bold text-white truncate">{m.symbol}</span>
+              <span
+                className={`font-bold text-sm text-left tabular-nums ${positive ? 'text-green-400' : 'text-red-400'}`}
+              >
                 {m.percentBps != null
                   ? `${m.percentBps >= 0 ? '+' : ''}${(m.percentBps / 100).toFixed(2)}%`
                   : '—'}
-                {' · '}
+              </span>
+              <span aria-hidden="true" />
+              <span
+                className={`font-bold text-sm text-left tabular-nums ${positive ? 'text-green-400' : 'text-red-400'}`}
+              >
                 {m.absoluteCents >= 0 ? '+' : ''}
                 {formatCurrency(m.absoluteCents)}
               </span>
