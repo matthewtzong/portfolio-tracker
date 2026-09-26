@@ -131,6 +131,59 @@ function formatDelta(delta?: OverviewDelta): string {
   return `${sign}${formatCurrency(delta.absoluteCents)}${pct}`
 }
 
+interface HoldingsRow {
+  key: string
+  label: string
+  assetClass: string
+  quantity: number | null
+  weightBps: number
+  valueCents: number
+}
+
+function holdingsRows(symbols: OverviewSymbol[], targets: AllocationTarget[]): HoldingsRow[] {
+  const groupBySymbol = new Map<string, AllocationTarget>()
+  for (const target of targets) {
+    if (target.kind !== 'group' || !target.members) continue
+    for (const member of target.members) {
+      groupBySymbol.set(member.trim().toUpperCase(), target)
+    }
+  }
+
+  const grouped = new Map<string, HoldingsRow>()
+  const rows: HoldingsRow[] = []
+  for (const symbol of symbols) {
+    const group = groupBySymbol.get(symbol.symbol.toUpperCase())
+    if (!group) {
+      rows.push({
+        key: symbol.symbol,
+        label: symbol.symbol,
+        assetClass: symbol.assetClass,
+        quantity: symbol.quantity,
+        weightBps: symbol.weightBps,
+        valueCents: symbol.valueCents,
+      })
+      continue
+    }
+    const existing = grouped.get(group.key)
+    if (!existing) {
+      grouped.set(group.key, {
+        key: `group:${group.key}`,
+        label: group.key,
+        assetClass: 'group',
+        quantity: null,
+        weightBps: symbol.weightBps,
+        valueCents: symbol.valueCents,
+      })
+      continue
+    }
+    existing.weightBps += symbol.weightBps
+    existing.valueCents += symbol.valueCents
+  }
+  rows.push(...grouped.values())
+  rows.sort((a, b) => b.valueCents - a.valueCents || a.label.localeCompare(b.label))
+  return rows
+}
+
 function assetClassLabel(key: string): string {
   switch (key) {
     case 'etf':
@@ -539,13 +592,15 @@ export function Allocations() {
 
       {/* Holdings table */}
       <div className="bg-card border border-border rounded-4xl p-6 sm:p-8 shadow-2xl">
-        <h2 className="text-xl font-bold text-white mb-1">Holdings by symbol</h2>
-        <p className="text-zinc-500 text-sm font-medium mb-6">Combined across accounts</p>
+        <h2 className="text-xl font-bold text-white mb-1">Holdings</h2>
+        <p className="text-zinc-500 text-sm font-medium mb-6">
+          Combined across accounts. Target groups are rolled up.
+        </p>
         <div className="bg-zinc-900 border border-border rounded-3xl overflow-x-auto">
           <table className="w-full min-w-[520px] text-left">
             <thead>
               <tr className="border-b border-border text-[10px] font-bold uppercase tracking-widest text-zinc-500">
-                <th className="px-6 py-4">Symbol</th>
+                <th className="px-6 py-4">Holding</th>
                 <th className="px-6 py-4">Class</th>
                 <th className="px-6 py-4 text-right">Qty</th>
                 <th className="px-6 py-4 text-right">Weight</th>
@@ -566,12 +621,14 @@ export function Allocations() {
                   </td>
                 </tr>
               ) : (
-                overview.bySymbol.map((row) => (
-                  <tr key={row.symbol} className="border-b border-border/40 hover:bg-zinc-800/30">
-                    <td className="px-6 py-4 font-bold text-white">{row.symbol}</td>
+                holdingsRows(overview.bySymbol, targets).map((row) => (
+                  <tr key={row.key} className="border-b border-border/40 hover:bg-zinc-800/30">
+                    <td className="px-6 py-4 font-bold text-white">{row.label}</td>
                     <td className="px-6 py-4 text-zinc-400 text-sm capitalize">{row.assetClass}</td>
                     <td className="px-6 py-4 text-right text-zinc-300 text-sm">
-                      {row.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                      {row.quantity == null
+                        ? '—'
+                        : row.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })}
                     </td>
                     <td className="px-6 py-4 text-right text-zinc-300 text-sm">
                       {formatBpsAsPercent(row.weightBps)}

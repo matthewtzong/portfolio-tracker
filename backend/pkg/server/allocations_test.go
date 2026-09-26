@@ -310,13 +310,13 @@ func TestFlexibleStringListUnmarshal(t *testing.T) {
 func TestComputeMoversSkipsCashAndNewPositions(t *testing.T) {
 	classBySymbol := map[string]string{"AAPL": assetClassStock, "SPAXX": assetClassCash, "NEW": assetClassStock}
 	prior := []overviewHoldingInput{
-		{Symbol: "AAPL", ValueCents: 100000},
-		{Symbol: "SPAXX", ValueCents: 50000},
+		{Symbol: "AAPL", Quantity: 1, ValueCents: 100000},
+		{Symbol: "SPAXX", Quantity: 1, ValueCents: 50000},
 	}
 	current := []overviewHoldingInput{
-		{Symbol: "AAPL", ValueCents: 110000},
-		{Symbol: "SPAXX", ValueCents: 60000},
-		{Symbol: "NEW", ValueCents: 20000},
+		{Symbol: "AAPL", Quantity: 1, ValueCents: 110000},
+		{Symbol: "SPAXX", Quantity: 1, ValueCents: 60000},
+		{Symbol: "NEW", Quantity: 1, ValueCents: 20000},
 	}
 	gainers, losers := computeMovers(prior, current, classBySymbol)
 	if len(gainers) != 1 || gainers[0].Symbol != "AAPL" {
@@ -336,12 +336,12 @@ func TestComputeMoversSortsByPercent(t *testing.T) {
 		"SMALL": assetClassStock,
 	}
 	prior := []overviewHoldingInput{
-		{Symbol: "VOO", ValueCents: 500000},
-		{Symbol: "SMALL", ValueCents: 10000},
+		{Symbol: "VOO", Quantity: 10, ValueCents: 500000},
+		{Symbol: "SMALL", Quantity: 1, ValueCents: 10000},
 	}
 	current := []overviewHoldingInput{
-		{Symbol: "VOO", ValueCents: 510000},  // +2%
-		{Symbol: "SMALL", ValueCents: 15000}, // +50%
+		{Symbol: "VOO", Quantity: 10, ValueCents: 510000},  // +2% price
+		{Symbol: "SMALL", Quantity: 1, ValueCents: 15000}, // +50% price
 	}
 	gainers, _ := computeMovers(prior, current, classBySymbol)
 	if len(gainers) != 2 {
@@ -349,6 +349,34 @@ func TestComputeMoversSortsByPercent(t *testing.T) {
 	}
 	if gainers[0].Symbol != "SMALL" {
 		t.Fatalf("expected SMALL first by %%, got %+v", gainers)
+	}
+}
+
+func TestComputeMoversIgnoresContributionQuantity(t *testing.T) {
+	classBySymbol := map[string]string{"VOO": assetClassETF}
+	prior := []overviewHoldingInput{
+		{Symbol: "VOO", Quantity: 10, ValueCents: 100000}, // $100/share
+	}
+	current := []overviewHoldingInput{
+		// Doubled shares via contribution, price unchanged → not a mover.
+		{Symbol: "VOO", Quantity: 20, ValueCents: 200000},
+	}
+	gainers, losers := computeMovers(prior, current, classBySymbol)
+	if len(gainers) != 0 || len(losers) != 0 {
+		t.Fatalf("contribution-only change should not be a mover, gainers=%+v losers=%+v", gainers, losers)
+	}
+
+	current[0].ValueCents = 220000 // price $110, +10%, plus extra shares
+	gainers, _ = computeMovers(prior, current, classBySymbol)
+	if len(gainers) != 1 {
+		t.Fatalf("expected one gainer, got %+v", gainers)
+	}
+	if gainers[0].PercentBps == nil || *gainers[0].PercentBps != 1000 {
+		t.Fatalf("want +10%% price return, got %+v", gainers[0])
+	}
+	// Market gain on the original 10 shares only: $10 * 10 = $100.
+	if gainers[0].AbsoluteCents != 10000 {
+		t.Fatalf("want $100 market gain on prior shares, got %d", gainers[0].AbsoluteCents)
 	}
 }
 

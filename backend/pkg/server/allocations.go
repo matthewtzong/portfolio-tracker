@@ -519,8 +519,22 @@ func dietzToOverviewDelta(perf *performanceResponseJSON) *overviewDeltaJSON {
 	}
 }
 
+type symbolPosition struct {
+	valueCents int64
+	quantity   float64
+}
+
 func sumHoldingsBySymbol(holdings []overviewHoldingInput, classBySymbol map[string]string) map[string]int64 {
-	sums := make(map[string]int64)
+	positions := sumPositionsBySymbol(holdings, classBySymbol)
+	sums := make(map[string]int64, len(positions))
+	for symbol, pos := range positions {
+		sums[symbol] = pos.valueCents
+	}
+	return sums
+}
+
+func sumPositionsBySymbol(holdings []overviewHoldingInput, classBySymbol map[string]string) map[string]symbolPosition {
+	sums := make(map[string]symbolPosition)
 	for _, h := range holdings {
 		symbol := strings.ToUpper(strings.TrimSpace(h.Symbol))
 		if symbol == "" {
@@ -529,29 +543,40 @@ func sumHoldingsBySymbol(holdings []overviewHoldingInput, classBySymbol map[stri
 		if resolveAssetClass(symbol, classBySymbol) == assetClassCash {
 			continue
 		}
-		sums[symbol] += h.ValueCents
+		pos := sums[symbol]
+		pos.valueCents += h.ValueCents
+		pos.quantity += h.Quantity
+		sums[symbol] = pos
 	}
 	return sums
 }
 
+// Price return only: (end price − start price) / start price.
+// New shares from contributions do not count as growth.
 func computeMovers(prior, current []overviewHoldingInput, classBySymbol map[string]string) (gainers, losers []overviewMoverJSON) {
-	from := sumHoldingsBySymbol(prior, classBySymbol)
-	to := sumHoldingsBySymbol(current, classBySymbol)
+	from := sumPositionsBySymbol(prior, classBySymbol)
+	to := sumPositionsBySymbol(current, classBySymbol)
 
 	movers := make([]overviewMoverJSON, 0)
-	for symbol, toCents := range to {
-		fromCents, ok := from[symbol]
-		if !ok || fromCents == 0 {
+	for symbol, toPos := range to {
+		fromPos, ok := from[symbol]
+		if !ok || fromPos.valueCents == 0 || fromPos.quantity <= 0 || toPos.quantity <= 0 {
 			continue
 		}
-		abs := toCents - fromCents
-		bps := int(math.Round(float64(abs) * 10000.0 / float64(fromCents)))
+		startPrice := float64(fromPos.valueCents) / fromPos.quantity
+		endPrice := float64(toPos.valueCents) / toPos.quantity
+		if startPrice == 0 {
+			continue
+		}
+		bps := int(math.Round((endPrice - startPrice) / startPrice * 10000.0))
+		// Dollar change on the shares already held, not on new contributions.
+		abs := int64(math.Round((endPrice - startPrice) * fromPos.quantity))
 		movers = append(movers, overviewMoverJSON{
 			Symbol:        symbol,
 			AbsoluteCents: abs,
 			PercentBps:    &bps,
-			FromCents:     fromCents,
-			ToCents:       toCents,
+			FromCents:     fromPos.valueCents,
+			ToCents:       toPos.valueCents,
 		})
 	}
 
