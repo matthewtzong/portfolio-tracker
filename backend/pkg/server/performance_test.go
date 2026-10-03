@@ -3,6 +3,8 @@ package server
 import (
 	"testing"
 	"time"
+
+	"github.com/matthewtzong/portfolio-tracker/backend/pkg/database"
 )
 
 func TestClassifyExternalCashFlow(t *testing.T) {
@@ -70,6 +72,27 @@ func TestModifiedDietzNoFlows(t *testing.T) {
 	}
 	if result.ReturnBps != 1000 {
 		t.Fatalf("returnBps=%d, want 1000 (10%%)", result.ReturnBps)
+	}
+}
+
+func TestModifiedDietzExcludesStartDayFlow(t *testing.T) {
+	start := time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	// EOD start already includes the $6,134 contribution dated on start day.
+	startDayContrib := cashFlow{Date: start, Amount: 613_400}
+	endDayContrib := cashFlow{Date: end, Amount: 100_000}
+
+	result := modifiedDietz(10_613_400, 10_713_400, start, end, []cashFlow{
+		startDayContrib,
+		endDayContrib,
+	})
+
+	if result.NetContributionsCents != 100_000 {
+		t.Fatalf("netContrib=%d, want 100000 (start-day flow excluded)", result.NetContributionsCents)
+	}
+	// end - start - endDayContrib = 10713400 - 10613400 - 100000 = 0
+	if result.GainCents != 0 {
+		t.Fatalf("gain=%d, want 0", result.GainCents)
 	}
 }
 
@@ -142,5 +165,29 @@ func TestOneYearStartClampedToEarliest(t *testing.T) {
 	}
 	if start.Format("2006-01-02") != "2026-03-31" {
 		t.Fatalf("1y clamped start=%s, want 2026-03-31", start.Format("2006-01-02"))
+	}
+}
+
+func TestSumHoldingsAsOfDayUsesLatestPerAccount(t *testing.T) {
+	day := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+	holdings := []database.DailyHolding{
+		// Account A only on Oct 2
+		{AccountID: "a", Date: database.DateOnly{Time: day}, ValueCents: 5_000_000},
+		{AccountID: "a", Date: database.DateOnly{Time: day}, ValueCents: 700_000},
+		// Account B last updated Sept 28 — still included as-of Oct 2
+		{AccountID: "b", Date: database.DateOnly{Time: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)}, ValueCents: 3_000_000},
+		// Stale older row for B should be ignored
+		{AccountID: "b", Date: database.DateOnly{Time: time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)}, ValueCents: 9_999_999},
+		// Future row ignored
+		{AccountID: "c", Date: database.DateOnly{Time: time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)}, ValueCents: 1_000_000},
+	}
+
+	sum, ok := sumHoldingsAsOfDay(holdings, day)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	// 5.7M (A) + 3.0M (B) = 8.7M — not just A's 5.7M from the exact end day
+	if sum != 8_700_000 {
+		t.Fatalf("sum=%d, want 8700000", sum)
 	}
 }

@@ -77,8 +77,9 @@ func classifyExternalCashFlow(txnType, subtype string, amountCents int64) (contr
 	return -amountCents, true
 }
 
-// Computes Modified Dietz return over [startDate, endDate].
-// flows should already be filtered to the period (exclusive of start boundary deposits on start day are included).
+// Computes Modified Dietz return over (startDate, endDate].
+// Start/end values are end-of-day holdings, so flows on startDate are already
+// inside startValue and must not be counted again. End-date flows are included.
 func modifiedDietz(startValue, endValue int64, startDate, endDate time.Time, flows []cashFlow) modifiedDietzResult {
 	result := modifiedDietzResult{
 		StartValueCents: startValue,
@@ -100,7 +101,8 @@ func modifiedDietz(startValue, endValue int64, startDate, endDate time.Time, flo
 		d := time.Date(f.Date.Year(), f.Date.Month(), f.Date.Day(), 0, 0, 0, 0, time.UTC)
 		s := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, time.UTC)
 		e := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, time.UTC)
-		if d.Before(s) || d.After(e) {
+		// EOD start: exclude start-day flows (already in startValue). Include end day.
+		if !d.After(s) || d.After(e) {
 			continue
 		}
 		netContrib += f.Amount
@@ -235,19 +237,20 @@ func syncInvestmentTransactions(ctx context.Context, deps apiDependencies, endDa
 }
 
 // Resolves portfolio value on or nearest to date.
-// Prefers sum of daily_holdings (real positions) over snapshots, which may have been
-// gap-filled with live account balances on historical dates.
+// Prefers per-account as-of daily_holdings (same idea as Portfolio current total)
+// over single-day sums and gap-filled snapshots.
 func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date time.Time) (int64, time.Time, error) {
 	day := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
 
-	// Prefer exact holdings sum for that day.
-	if sum, ok, err := sumDailyHoldingsOnDate(ctx, db, day); err != nil {
+	// Prefer holdings as-of that day: each account's latest snapshot on or before day
+	// (accounts often land on different nights; a single-day sum understates total).
+	if sum, ok, err := sumDailyHoldingsAsOfDate(ctx, db, day); err != nil {
 		return 0, time.Time{}, err
 	} else if ok {
 		return sum, day, nil
 	}
 
-	// Nearest holdings date within ±7 days.
+	// Nearest holdings date within ±7 days (legacy fallback if as-of window empty).
 	windowStart := day.AddDate(0, 0, -7)
 	windowEnd := day.AddDate(0, 0, 7)
 	nearbyHoldings, err := db.ListDailyHoldings(ctx, windowStart, windowEnd)
@@ -325,19 +328,59 @@ func resolvePortfolioValueCents(ctx context.Context, db *database.Client, date t
 	return sum, monthDate, nil
 }
 
-func sumDailyHoldingsOnDate(ctx context.Context, db *database.Client, day time.Time) (int64, bool, error) {
-	holdings, err := db.ListDailyHoldings(ctx, day, day)
+// Lookback for per-account as-of valuation (daily_holdings retention is 30 days).
+const holdingsAsOfLookbackDays = 40
+
+// sumHoldingsAsOfDay sums each account's most recent holdings on or before day.
+// Pure helper so staggered account snapshot nights still produce a full portfolio total.
+func sumHoldingsAsOfDay(holdings []database.DailyHolding, day time.Time) (int64, bool) {
+	day = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
+	type datedSum struct {
+		date time.Time
+		sum  int64
+	}
+	byAccount := make(map[string]datedSum)
+	for _, h := range holdings {
+		d := time.Date(h.Date.Time.Year(), h.Date.Time.Month(), h.Date.Time.Day(), 0, 0, 0, 0, time.UTC)
+		if d.After(day) {
+			continue
+		}
+		cur, ok := byAccount[h.AccountID]
+		if !ok || d.After(cur.date) {
+			byAccount[h.AccountID] = datedSum{date: d, sum: h.ValueCents}
+			continue
+		}
+		if d.Equal(cur.date) {
+			cur.sum += h.ValueCents
+			byAccount[h.AccountID] = cur
+		}
+	}
+	if len(byAccount) == 0 {
+		return 0, false
+	}
+	var total int64
+	for _, v := range byAccount {
+		total += v.sum
+	}
+	return total, true
+}
+
+// Portfolio value as of day: latest holdings per account on or before day.
+func sumDailyHoldingsAsOfDate(ctx context.Context, db *database.Client, day time.Time) (int64, bool, error) {
+	day = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
+	windowStart := day.AddDate(0, 0, -holdingsAsOfLookbackDays)
+	holdings, err := db.ListDailyHoldings(ctx, windowStart, day)
 	if err != nil {
 		return 0, false, err
 	}
-	if len(holdings) == 0 {
-		return 0, false, nil
-	}
-	var sum int64
-	for _, h := range holdings {
-		sum += h.ValueCents
-	}
-	return sum, true, nil
+	sum, ok := sumHoldingsAsOfDay(holdings, day)
+	return sum, ok, nil
+}
+
+func sumDailyHoldingsOnDate(ctx context.Context, db *database.Client, day time.Time) (int64, bool, error) {
+	// Exact same-day sum is incomplete when accounts sync on different nights.
+	// Use as-of valuation everywhere we need "portfolio on this date".
+	return sumDailyHoldingsAsOfDate(ctx, db, day)
 }
 
 // Returns sorted unique dates with portfolio data (holdings or daily snapshots).
@@ -374,9 +417,9 @@ func portfolioValueDates(ctx context.Context, db *database.Client, start, end ti
 	return dates, nil
 }
 
-// Portfolio value on an exact calendar day only (no nearest-day window).
+// Portfolio value as of a calendar day (per-account latest holdings on or before day).
 func resolvePortfolioValueOnExactDate(ctx context.Context, db *database.Client, day time.Time) (int64, bool, error) {
-	if sum, ok, err := sumDailyHoldingsOnDate(ctx, db, day); err != nil {
+	if sum, ok, err := sumDailyHoldingsAsOfDate(ctx, db, day); err != nil {
 		return 0, false, err
 	} else if ok {
 		return sum, true, nil
@@ -745,13 +788,12 @@ func currentHoldingsTotalCents(ctx context.Context, db *database.Client) (int64,
 	if err != nil || latest == nil {
 		return 0, err
 	}
-	holdings, err := db.ListDailyHoldings(ctx, *latest, *latest)
+	sum, ok, err := sumDailyHoldingsAsOfDate(ctx, db, *latest)
 	if err != nil {
 		return 0, err
 	}
-	var sum int64
-	for _, h := range holdings {
-		sum += h.ValueCents
+	if !ok {
+		return 0, nil
 	}
 	return sum, nil
 }
