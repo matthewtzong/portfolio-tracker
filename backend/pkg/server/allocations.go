@@ -852,13 +852,14 @@ func handleGetPortfolioOverview(w http.ResponseWriter, r *http.Request, deps api
 	}
 
 	dates := uniqueHoldingDates(holdingsHistory)
-	var current, prior, oldest []overviewHoldingInput
-	if len(dates) >= 1 {
-		current = filterHoldingsForDate(holdingsHistory, dates[len(dates)-1], accountNameMap)
-	}
+	// Current allocations: each account's latest holdings on or before today
+	// (accounts often snapshot on different nights).
+	asOfToday := dayStart.Format(dateLayout)
+	current := filterHoldingsAsOfDate(holdingsHistory, asOfToday, accountNameMap)
+	var prior, oldest []overviewHoldingInput
 	if len(dates) >= 2 {
-		prior = filterHoldingsForDate(holdingsHistory, dates[len(dates)-2], accountNameMap)
-		oldest = filterHoldingsForDate(holdingsHistory, dates[0], accountNameMap)
+		prior = filterHoldingsAsOfDate(holdingsHistory, dates[len(dates)-2], accountNameMap)
+		oldest = filterHoldingsAsOfDate(holdingsHistory, dates[0], accountNameMap)
 	}
 
 	securities, err := deps.db.ListSecurities(r.Context())
@@ -914,7 +915,7 @@ func handleGetPortfolioOverview(w http.ResponseWriter, r *http.Request, deps api
 	}
 	if weekDate, ok := findWeekComparisonDate(dates); ok && len(dates) >= 1 {
 		latest := dates[len(dates)-1]
-		weekPrior := filterHoldingsForDate(holdingsHistory, weekDate, accountNameMap)
+		weekPrior := filterHoldingsAsOfDate(holdingsHistory, weekDate, accountNameMap)
 		resp.MoversWeek = buildMoversPeriod(weekPrior, current, weekDate, latest, classBySymbol)
 	}
 	_ = json.NewEncoder(w).Encode(resp)
@@ -947,6 +948,52 @@ func filterHoldingsForDate(holdings []database.DailyHolding, date string, accoun
 			Quantity:    h.Quantity,
 			ValueCents:  h.ValueCents,
 			Date:        date,
+		})
+	}
+	return out
+}
+
+// filterHoldingsAsOfDate returns each account's holdings from its most recent
+// snapshot on or before asOfDate (YYYY-MM-DD).
+func filterHoldingsAsOfDate(holdings []database.DailyHolding, asOfDate string, accountNameMap map[string]string) []overviewHoldingInput {
+	asOf, err := time.Parse(dateLayout, asOfDate)
+	if err != nil {
+		return filterHoldingsForDate(holdings, asOfDate, accountNameMap)
+	}
+	asOf = time.Date(asOf.Year(), asOf.Month(), asOf.Day(), 0, 0, 0, 0, time.UTC)
+
+	latestByAccount := make(map[string]time.Time)
+	for _, h := range holdings {
+		d := time.Date(h.Date.Year(), h.Date.Month(), h.Date.Day(), 0, 0, 0, 0, time.UTC)
+		if d.After(asOf) {
+			continue
+		}
+		if prev, ok := latestByAccount[h.AccountID]; !ok || d.After(prev) {
+			latestByAccount[h.AccountID] = d
+		}
+	}
+	if len(latestByAccount) == 0 {
+		return nil
+	}
+
+	wantDate := make(map[string]string, len(latestByAccount))
+	for accountID, d := range latestByAccount {
+		wantDate[accountID] = d.Format(dateLayout)
+	}
+
+	out := make([]overviewHoldingInput, 0)
+	for _, h := range holdings {
+		want, ok := wantDate[h.AccountID]
+		if !ok || h.Date.Format(dateLayout) != want {
+			continue
+		}
+		out = append(out, overviewHoldingInput{
+			AccountID:   h.AccountID,
+			AccountName: accountNameMap[h.AccountID],
+			Symbol:      h.Symbol,
+			Quantity:    h.Quantity,
+			ValueCents:  h.ValueCents,
+			Date:        want,
 		})
 	}
 	return out

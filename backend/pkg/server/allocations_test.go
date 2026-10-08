@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/matthewtzong/portfolio-tracker/backend/pkg/database"
 )
 
 func TestDietzToOverviewDelta(t *testing.T) {
@@ -388,5 +391,28 @@ func TestFindWeekComparisonDate(t *testing.T) {
 	}
 	if got != "2026-08-17" {
 		t.Fatalf("expected 2026-08-17, got %s", got)
+	}
+}
+
+func TestFilterHoldingsAsOfDateUsesLatestPerAccount(t *testing.T) {
+	names := map[string]string{"a": "Brokerage", "b": "HSA"}
+	holdings := []database.DailyHolding{
+		{AccountID: "a", Symbol: "VOO", ValueCents: 100, Date: database.DateOnly{Time: time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC)}},
+		{AccountID: "b", Symbol: "FXAIX", ValueCents: 50, Date: database.DateOnly{Time: time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)}},
+		{AccountID: "b", Symbol: "OLD", ValueCents: 999, Date: database.DateOnly{Time: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}},
+	}
+	got := filterHoldingsAsOfDate(holdings, "2026-10-08", names)
+	if len(got) != 2 {
+		t.Fatalf("want 2 holdings (A today + B as-of Oct 5), got %+v", got)
+	}
+	bySymbol := map[string]int64{}
+	for _, h := range got {
+		bySymbol[h.Symbol] = h.ValueCents
+	}
+	if bySymbol["VOO"] != 100 || bySymbol["FXAIX"] != 50 {
+		t.Fatalf("unexpected holdings: %+v", bySymbol)
+	}
+	if _, ok := bySymbol["OLD"]; ok {
+		t.Fatal("stale B holding should not be included")
 	}
 }
